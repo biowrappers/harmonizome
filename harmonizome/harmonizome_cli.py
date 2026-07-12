@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Command-line interface for the Harmonizome package."""
 
-import argparse
 import logging
 import os
 import sys
 from pathlib import Path
 from typing import Any, Optional
+
+import click
 
 from harmonizome import Harmonizome
 
@@ -300,8 +301,8 @@ def get_functional_associations(
         if output_file:
             import json
 
-            with open(output_file, "w") as f:
-                json.dump(results, f, indent=2)
+            with Path(output_file).open("w", encoding="utf-8") as file_handle:
+                json.dump(results, file_handle, indent=2)
             print_success(f"Results saved to: {output_file}")
 
     except Exception as e:
@@ -309,87 +310,80 @@ def get_functional_associations(
         sys.exit(1)
 
 
-def main() -> None:
-    """Main CLI function."""
-    parser = argparse.ArgumentParser(
-        description=f"{Colors.BOLD}Harmonizome CLI{Colors.END} - Access to harmonized datasets of genes and proteins",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=f"""
-{Colors.BOLD}Examples:{Colors.END}
-  %(prog)s list-datasets
-  %(prog)s get-entity gene BRCA1
-  %(prog)s download ENCODE GTEx
-  %(prog)s download --output-dir ./data ENCODE
-  %(prog)s functional-associations STAT3
-  %(prog)s functional-associations BRCA1 --datasets ENCODE GTEx
-  %(prog)s functional-associations STAT3 --use-download --output-file results.json
-        """,
-    )
+ENTITY_TYPE_CHOICES = click.Choice(
+    ["gene", "gene_set", "attribute", "dataset", "protein", "resource"],
+    case_sensitive=False,
+)
 
-    parser.add_argument(
-        "-v", "--verbose", action="store_true", help="Enable verbose logging"
-    )
 
-    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+@click.group(
+    invoke_without_command=True,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+@click.option("-v", "--verbose", is_flag=True, help="Enable verbose logging.")
+@click.pass_context
+def main(ctx: click.Context, verbose: bool) -> None:
+    """Access harmonized datasets of genes and proteins."""
+    setup_logging(verbose)
 
-    # List datasets command
-    subparsers.add_parser("list-datasets", help="List all available datasets")
-
-    # Get entity command
-    entity_parser = subparsers.add_parser(
-        "get-entity", help="Get information about a specific entity"
-    )
-    entity_parser.add_argument(
-        "entity_type",
-        choices=["gene", "gene_set", "attribute", "dataset", "protein", "resource"],
-        help="Type of entity to query",
-    )
-    entity_parser.add_argument("name", help="Name of the entity")
-
-    # Download command
-    download_parser = subparsers.add_parser("download", help="Download datasets")
-    download_parser.add_argument(
-        "datasets", nargs="+", help="Names of datasets to download"
-    )
-    download_parser.add_argument(
-        "--output-dir",
-        help="Output directory for downloads (default: current directory)",
-    )
-
-    # Functional associations command
-    assoc_parser = subparsers.add_parser(
-        "functional-associations", help="Get functional associations for a gene"
-    )
-    assoc_parser.add_argument("gene_symbol", help="Gene symbol (e.g., STAT3, BRCA1)")
-    assoc_parser.add_argument(
-        "--datasets",
-        nargs="+",
-        help="Specific datasets to search (default: all datasets)",
-    )
-
-    assoc_parser.add_argument("--output-file", help="Save results to JSON file")
-
-    args = parser.parse_args()
-
-    if not args.command:
+    if ctx.invoked_subcommand is None:
         print_header("Welcome to Harmonizome CLI")
         print_info("Use --help to see available commands")
         print()
-        parser.print_help()
-        sys.exit(1)
+        click.echo(ctx.get_help())
+        ctx.exit(1)
 
-    setup_logging(args.verbose)
 
-    if args.command == "list-datasets":
-        list_datasets()
-    elif args.command == "get-entity":
-        get_entity_info(args.entity_type, args.name)
-    elif args.command == "download":
-        download_datasets(args.datasets, args.output_dir)
-    elif args.command == "functional-associations":
-        get_functional_associations(
-            args.gene_symbol, datasets=args.datasets, output_file=args.output_file
-        )
+@main.command("list-datasets")
+def list_datasets_command() -> None:
+    """List all available datasets."""
+    list_datasets()
+
+
+@main.command("get-entity")
+@click.argument("entity_type", type=ENTITY_TYPE_CHOICES)
+@click.argument("name")
+def get_entity_command(entity_type: str, name: str) -> None:
+    """Get information about a specific entity."""
+    get_entity_info(entity_type.lower(), name)
+
+
+@main.command("download")
+@click.argument("datasets", nargs=-1, required=True)
+@click.option(
+    "--output-dir",
+    type=click.Path(file_okay=False, dir_okay=True, path_type=str),
+    help="Output directory for downloads. Defaults to the current directory.",
+)
+def download_command(datasets: tuple[str, ...], output_dir: Optional[str]) -> None:
+    """Download datasets."""
+    download_datasets(list(datasets), output_dir)
+
+
+@main.command("functional-associations")
+@click.argument("gene_symbol")
+@click.option(
+    "--datasets",
+    multiple=True,
+    help="Specific datasets to search. Defaults to all datasets.",
+)
+@click.option(
+    "--output-file",
+    type=click.Path(dir_okay=False, path_type=str),
+    help="Save results to a JSON file.",
+)
+def functional_associations_command(
+    gene_symbol: str,
+    datasets: tuple[str, ...],
+    output_file: Optional[str],
+) -> None:
+    """Get functional associations for a gene."""
+    requested_datasets = list(datasets) if datasets else None
+    get_functional_associations(
+        gene_symbol,
+        datasets=requested_datasets,
+        output_file=output_file,
+    )
 
 
 if __name__ == "__main__":
