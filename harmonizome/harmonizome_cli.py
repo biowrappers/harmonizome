@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Command-line interface for the Harmonizome package."""
 
+import json
 import logging
 import os
 import sys
@@ -10,53 +11,64 @@ from typing import Any, Optional
 import click
 
 from harmonizome import Harmonizome
+from harmonizome.harmonizome import _get_dataset_to_path
+
+FIELD_ORDER: dict[str, list[str]] = {
+    "gene": [
+        "symbol",
+        "name",
+        "synonyms",
+        "description",
+        "ncbiEntrezGeneId",
+        "ncbiEntrezGeneUrl",
+        "proteins",
+        "hgncRootFamilies",
+    ],
+    "protein": [
+        "symbol",
+        "name",
+        "description",
+        "uniprotId",
+        "uniprotUrl",
+        "genes",
+    ],
+    "dataset": ["name", "description", "version", "resource"],
+    "attribute": ["name", "description", "dataset", "resource"],
+    "gene_set": ["name", "description", "dataset", "genes"],
+    "resource": ["name", "description", "url", "version"],
+}
+
+DISPLAY_KEY_OVERRIDES = {
+    "ncbiEntrezGeneId": "NCBI Entrez Gene ID",
+    "ncbiEntrezGeneUrl": "NCBI Entrez Gene URL",
+    "uniprotId": "UniProt ID",
+    "uniprotUrl": "UniProt URL",
+}
 
 
-# ANSI color codes for terminal output
-class Colors:
-    HEADER = "\033[95m"
-    BLUE = "\033[94m"
-    CYAN = "\033[96m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    RED = "\033[91m"
-    BOLD = "\033[1m"
-    UNDERLINE = "\033[4m"
-    END = "\033[0m"
+def write_header(text: str) -> None:
+    """Render a section header using click styling."""
+    click.secho(f"\n{'=' * 60}", fg="magenta", bold=True)
+    click.secho(f"  {text}", fg="magenta", bold=True)
+    click.secho(f"{'=' * 60}\n", fg="magenta", bold=True)
 
 
-def print_header(text: str) -> None:
-    """Print a formatted header."""
-    print(f"\n{Colors.HEADER}{Colors.BOLD}{'='*60}")
-    print(f"  {text}")
-    print(f"{'='*60}{Colors.END}\n")
+def write_status(symbol: str, text: str, color: str) -> None:
+    """Render a compact status line with consistent coloring."""
+    click.secho(f"{symbol} {text}", fg=color)
 
 
-def print_success(text: str) -> None:
-    """Print success message in green."""
-    print(f"{Colors.GREEN}✓ {text}{Colors.END}")
+def write_dataset_item(index: int, dataset: str, short_code: str) -> None:
+    """Render one dataset list entry."""
+    click.secho(f"{index:3d}.", fg="cyan", nl=False)
+    click.secho(f" {dataset}", bold=True)
+    click.secho("       Short code:", fg="yellow", nl=False)
+    click.echo(f" {short_code}\n")
 
 
-def print_warning(text: str) -> None:
-    """Print warning message in yellow."""
-    print(f"{Colors.YELLOW}⚠ {text}{Colors.END}")
-
-
-def print_error(text: str) -> None:
-    """Print error message in red."""
-    print(f"{Colors.RED}✗ {text}{Colors.END}")
-
-
-def print_info(text: str) -> None:
-    """Print info message in blue."""
-    print(f"{Colors.BLUE}ℹ {text}{Colors.END}")
-
-
-def print_dataset_item(index: int, dataset: str, short_code: str) -> None:
-    """Print a formatted dataset item."""
-    print(f"{Colors.CYAN}{index:3d}.{Colors.END} {Colors.BOLD}{dataset}{Colors.END}")
-    print(f"       {Colors.YELLOW}Short code:{Colors.END} {short_code}")
-    print()
+def display_key_name(key: str) -> str:
+    """Convert raw response keys into human-readable labels."""
+    return DISPLAY_KEY_OVERRIDES.get(key, key.replace("_", " ").title())
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -67,18 +79,19 @@ def setup_logging(verbose: bool = False) -> None:
 
 def list_datasets() -> None:
     """List all available datasets."""
-    from harmonizome.harmonizome import DATASET_TO_PATH
-
-    print_header("Available Harmonizome Datasets")
-    print_info(f"Total datasets: {len(Harmonizome.DATASETS)}")
-    print_warning(
-        "Use the full dataset name for downloading (e.g., 'ENCODE Transcription Factor Binding Site Profiles')"
+    dataset_to_path = _get_dataset_to_path()
+    write_header("Available Harmonizome Datasets")
+    write_status("i", f"Total datasets: {len(Harmonizome.DATASETS)}", "blue")
+    write_status(
+        "!",
+        "Use the full dataset name for downloading (e.g., 'ENCODE Transcription Factor Binding Site Profiles')",
+        "yellow",
     )
-    print()
+    click.echo()
 
     for i, dataset in enumerate(Harmonizome.DATASETS, 1):
-        short_code = DATASET_TO_PATH.get(dataset, "N/A")
-        print_dataset_item(i, dataset, short_code)
+        short_code = dataset_to_path.get(dataset, "N/A")
+        write_dataset_item(i, dataset, short_code)
 
 
 def format_value(key: str, value: Any) -> str:
@@ -123,36 +136,9 @@ def get_entity_info(entity_type: str, name: str) -> None:
     """Get information about a specific entity."""
     try:
         info = Harmonizome.get(entity_type, name)
-        print_header(f"{entity_type.title()}: {name}")
+        write_header(f"{entity_type.title()}: {name}")
 
-        # Define the order and labels for common fields
-        field_order = {
-            "gene": [
-                "symbol",
-                "name",
-                "synonyms",
-                "description",
-                "ncbiEntrezGeneId",
-                "ncbiEntrezGeneUrl",
-                "proteins",
-                "hgncRootFamilies",
-            ],
-            "protein": [
-                "symbol",
-                "name",
-                "description",
-                "uniprotId",
-                "uniprotUrl",
-                "genes",
-            ],
-            "dataset": ["name", "description", "version", "resource"],
-            "attribute": ["name", "description", "dataset", "resource"],
-            "gene_set": ["name", "description", "dataset", "genes"],
-            "resource": ["name", "description", "url", "version"],
-        }
-
-        # Get the field order for this entity type, or use all keys
-        ordered_fields = field_order.get(entity_type, list(info.keys()))
+        ordered_fields = FIELD_ORDER.get(entity_type, list(info.keys()))
 
         # Add any missing fields to the end
         for key in info.keys():
@@ -163,54 +149,39 @@ def get_entity_info(entity_type: str, name: str) -> None:
             if key in info:
                 value = info[key]
                 formatted_value = format_value(key, value)
-
-                # Format the key name for display
-                display_key = key.replace("_", " ").title()
-                if key == "ncbiEntrezGeneId":
-                    display_key = "NCBI Entrez Gene ID"
-                elif key == "ncbiEntrezGeneUrl":
-                    display_key = "NCBI Entrez Gene URL"
-                elif key == "uniprotId":
-                    display_key = "UniProt ID"
-                elif key == "uniprotUrl":
-                    display_key = "UniProt URL"
-
-                print(f"{Colors.BOLD}{display_key}:{Colors.END}")
+                click.secho(f"{display_key_name(key)}:", bold=True)
                 if "\n" in formatted_value:
-                    print(f"{formatted_value}")
+                    click.echo(formatted_value)
                 else:
-                    print(f"  {formatted_value}")
-                print()
+                    click.echo(f"  {formatted_value}")
+                click.echo()
 
     except Exception as e:
-        print_error(f"Error getting {entity_type} '{name}': {e}")
+        write_status("x", f"Error getting {entity_type} '{name}': {e}", "red")
         sys.exit(1)
 
 
 def find_dataset_by_partial_name(partial_name: str) -> list[str]:
     """Find datasets that contain the partial name."""
-    from harmonizome.harmonizome import DATASET_TO_PATH
-
+    dataset_to_path = _get_dataset_to_path()
     matching_datasets = []
-    for dataset_name in DATASET_TO_PATH.keys():
+    for dataset_name in dataset_to_path:
         if partial_name.upper() in dataset_name.upper():
             matching_datasets.append(dataset_name)
     return matching_datasets
 
 
-def download_datasets(
-    datasets: list[str], output_dir: Optional[str] = None
-) -> None:
+def download_datasets(datasets: list[str], output_dir: Optional[str] = None) -> None:
     """Download specified datasets."""
-    print_header("Harmonizome Dataset Download")
+    write_header("Harmonizome Dataset Download")
 
     if output_dir:
-        print_info(f"Output directory: {output_dir}")
+        write_status("i", f"Output directory: {output_dir}", "blue")
         Path(output_dir).mkdir(exist_ok=True)
         original_working_directory = Path.cwd()
         os.chdir(output_dir)
     else:
-        print_info("Output directory: current directory")
+        write_status("i", "Output directory: current directory", "blue")
         original_working_directory = None
 
     # Check if any datasets need to be expanded (e.g., "ENCODE" -> all ENCODE datasets)
@@ -220,26 +191,31 @@ def download_datasets(
             # Find all datasets containing this name
             matching = find_dataset_by_partial_name(dataset)
             if matching:
-                print_success(f"Found {len(matching)} datasets matching '{dataset}':")
+                write_status(
+                    "+",
+                    f"Found {len(matching)} datasets matching '{dataset}':",
+                    "green",
+                )
                 for match in matching:
-                    print(f"  {Colors.CYAN}•{Colors.END} {match}")
+                    click.secho("  •", fg="cyan", nl=False)
+                    click.echo(f" {match}")
                 expanded_datasets.extend(matching)
             else:
                 expanded_datasets.append(dataset)
         else:
             expanded_datasets.append(dataset)
 
-    print_info(f"Total datasets to download: {len(expanded_datasets)}")
-    print()
+    write_status("i", f"Total datasets to download: {len(expanded_datasets)}", "blue")
+    click.echo()
 
     try:
         for filename in Harmonizome.download(expanded_datasets):
-            print_success(f"Downloaded: {filename}")
+            write_status("+", f"Downloaded: {filename}", "green")
     except KeyboardInterrupt:
-        print_warning("Download interrupted by user.")
+        write_status("!", "Download interrupted by user.", "yellow")
         sys.exit(1)
     except Exception as e:
-        print_error(f"Error downloading datasets: {e}")
+        write_status("x", f"Error downloading datasets: {e}", "red")
         sys.exit(1)
     finally:
         if original_working_directory is not None:
@@ -252,12 +228,12 @@ def get_functional_associations(
     output_file: Optional[str] = None,
 ) -> None:
     """Get functional associations for a gene."""
-    print_header(f"Functional Associations for {gene_symbol}")
+    write_header(f"Functional Associations for {gene_symbol}")
 
     if datasets:
-        print_info(f"Datasets: {', '.join(datasets)}")
+        write_status("i", f"Datasets: {', '.join(datasets)}", "blue")
     else:
-        print_info("Datasets: All available")
+        write_status("i", "Datasets: All available", "blue")
 
     try:
         # Get functional associations
@@ -267,46 +243,45 @@ def get_functional_associations(
         gene_info = results["gene_info"]
         func_assoc = results["functional_associations"]
 
-        print(f"\n{Colors.BOLD}Gene Information:{Colors.END}")
-        print(f"  Symbol: {gene_info['symbol']}")
-        print(f"  Name: {gene_info['name']}")
-        print(f"  NCBI ID: {gene_info['ncbi_id']}")
-        print(f"  Description: {gene_info['description'][:200]}...")
+        click.secho("\nGene Information:", bold=True)
+        click.echo(f"  Symbol: {gene_info['symbol']}")
+        click.echo(f"  Name: {gene_info['name']}")
+        click.echo(f"  NCBI ID: {gene_info['ncbi_id']}")
+        click.echo(f"  Description: {gene_info['description'][:200]}...")
 
-        print(f"\n{Colors.BOLD}Functional Associations Summary:{Colors.END}")
-        print(f"  Total datasets: {func_assoc['total_datasets']}")
-        print(f"  Total associations: {func_assoc['total_associations']}")
-        print(f"  Increased associations: {func_assoc['total_increased']}")
-        print(f"  Decreased associations: {func_assoc['total_decreased']}")
+        click.secho("\nFunctional Associations Summary:", bold=True)
+        click.echo(f"  Total datasets: {func_assoc['total_datasets']}")
+        click.echo(f"  Total associations: {func_assoc['total_associations']}")
+        click.echo(f"  Increased associations: {func_assoc['total_increased']}")
+        click.echo(f"  Decreased associations: {func_assoc['total_decreased']}")
 
         # Show dataset details
-        print(f"\n{Colors.BOLD}Dataset Details:{Colors.END}")
+        click.secho("\nDataset Details:", bold=True)
         for dataset in func_assoc["datasets"][:5]:  # Show first 5 datasets
-            print(f"\n{Colors.CYAN}Dataset: {dataset['dataset']}{Colors.END}")
-            print(f"  Summary: {dataset['summary'][:100]}...")
+            click.secho(f"\nDataset: {dataset['dataset']}", fg="cyan")
+            click.echo(f"  Summary: {dataset['summary'][:100]}...")
 
             for assoc_group in dataset["associations"]:
-                print(f"  {assoc_group['description']}:")
+                click.echo(f"  {assoc_group['description']}:")
                 for item in assoc_group["items"][:3]:  # Show first 3
-                    print(f"    {item['name']} [{item['score']:.5f}]")
+                    click.echo(f"    {item['name']} [{item['score']:.5f}]")
                 if len(assoc_group["items"]) > 3:
-                    print(f"    ... and {len(assoc_group['items']) - 3} more")
+                    click.echo(f"    ... and {len(assoc_group['items']) - 3} more")
 
         if len(func_assoc["datasets"]) > 5:
-            print(
-                f"\n{Colors.YELLOW}... and {len(func_assoc['datasets']) - 5} more datasets{Colors.END}"
+            click.secho(
+                f"\n... and {len(func_assoc['datasets']) - 5} more datasets",
+                fg="yellow",
             )
 
         # Save to file if requested
         if output_file:
-            import json
-
             with Path(output_file).open("w", encoding="utf-8") as file_handle:
                 json.dump(results, file_handle, indent=2)
-            print_success(f"Results saved to: {output_file}")
+            write_status("+", f"Results saved to: {output_file}", "green")
 
     except Exception as e:
-        print_error(f"Error getting functional associations: {e}")
+        write_status("x", f"Error getting functional associations: {e}", "red")
         sys.exit(1)
 
 
@@ -327,9 +302,9 @@ def main(ctx: click.Context, verbose: bool) -> None:
     setup_logging(verbose)
 
     if ctx.invoked_subcommand is None:
-        print_header("Welcome to Harmonizome CLI")
-        print_info("Use --help to see available commands")
-        print()
+        write_header("Welcome to Harmonizome CLI")
+        write_status("i", "Use --help to see available commands", "blue")
+        click.echo()
         click.echo(ctx.get_help())
         ctx.exit(1)
 
