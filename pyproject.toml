@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "harmonizome"
-version = "1.0.0"
+version = "1.0.1"
 description = "Python client for the Harmonizome API - a resource for exploring gene sets and their attributes"
 readme = "README.md"
 license = "MIT"

@@ -91,7 +91,7 @@ def download_from_url(url: str) -> BinaryIO:
         raise
 
 
-VERSION = "1.0"
+VERSION = "1.0.1"
 API_URL = "https://maayanlab.cloud/Harmonizome/api"
 DOWNLOAD_URL = "https://maayanlab.cloud/static/hdfs/harmonizome/data"
 

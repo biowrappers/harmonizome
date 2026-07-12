@@ -32,7 +32,7 @@ class TestEntity:
 class TestHarmonizome:
     def test_version(self):
         assert hasattr(Harmonizome, "__version__")
-        assert Harmonizome.__version__ == "1.0"
+        assert Harmonizome.__version__ == "1.0.1"
 
     def test_datasets_property(self):
         assert hasattr(Harmonizome, "DATASETS")
