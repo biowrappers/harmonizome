@@ -4,22 +4,41 @@ import gzip
 import json
 import logging
 import ssl
-from collections.abc import Iterator
+from collections.abc import Iterator, Set
 from io import BytesIO
 from pathlib import Path
 from typing import Any, BinaryIO, Optional, Union
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote_plus
 from urllib.request import urlopen
 
+import numpy as np
 import pandas as pd
+from scipy.sparse import lil_matrix
 
 from .utils import cache_to_file
 
 logger = logging.getLogger(__name__)
 
-# Enumerables and constants
-# -----------------------------------------------------------------------------
+GENE_MATRIX_DOWNLOADS = [
+    "gene_attribute_matrix.txt.gz",
+    "attribute_list_entries.txt.gz",
+]
+DEFAULT_GENE_INFO = {
+    "name": "Unknown",
+    "description": "No description available",
+}
+DEFAULT_CONFIG = {
+    "downloads": [
+        "gene_attribute_matrix.txt.gz",
+        "gene_list_terms.txt.gz",
+        "attribute_list_entries.txt.gz",
+    ],
+    "datasets": {"ENCODE": "encode", "GTEx": "gtex"},
+}
+_CONFIG: Optional[dict[str, Any]] = None
+DOWNLOADS: list[str] = []
+DATASET_TO_PATH: dict[str, str] = {}
 
 
 class Enum(set):
@@ -68,7 +87,7 @@ def json_from_url(url: str) -> dict[str, Any]:
             decoded_data = data.decode("latin-1")
 
         return json.loads(decoded_data)
-    except Exception as e:
+    except (HTTPError, URLError, json.JSONDecodeError) as e:
         logger.error(f"Failed to fetch data from {url}: {e}")
         raise
 
@@ -86,7 +105,7 @@ def download_from_url(url: str) -> BinaryIO:
     try:
         response = urlopen(url, context=context)
         return response
-    except Exception as e:
+    except (HTTPError, URLError) as e:
         logger.error(f"Failed to download from {url}: {e}")
         raise
 
@@ -96,37 +115,58 @@ API_URL = "https://maayanlab.cloud/Harmonizome/api"
 DOWNLOAD_URL = "https://maayanlab.cloud/static/hdfs/harmonizome/data"
 
 
-# This config objects pulls the names of the datasets, their directories, and
-# the possible downloads from the API. This allows us to add new datasets and
-# downloads without breaking this file.
 def _load_config() -> dict[str, Any]:
     """Load configuration from API with SSL fallback."""
     try:
-        config = json_from_url(API_URL + "/dark/script_config")
-        return config
-    except Exception as e:
+        return json_from_url(f"{API_URL}/dark/script_config")
+    except (HTTPError, URLError, json.JSONDecodeError) as e:
         logger.error(f"Failed to load configuration from API: {e}")
-        # Return minimal config to prevent import errors
-        return {
-            "downloads": [
-                "gene_attribute_matrix.txt.gz",
-                "gene_list_terms.txt.gz",
-                "attribute_list_entries.txt.gz",
-            ],
-            "datasets": {"ENCODE": "encode", "GTEx": "gtex"},  # Minimal fallback
-        }
+        return DEFAULT_CONFIG.copy()
 
 
-config = _load_config()
-DOWNLOADS = [x for x in config.get("downloads", [])]
-DATASET_TO_PATH = config.get("datasets", {})
+def _ensure_config_loaded() -> dict[str, Any]:
+    """Populate module-level config only when a caller first needs it."""
+    global _CONFIG, DOWNLOADS, DATASET_TO_PATH
+
+    if _CONFIG is None:
+        _CONFIG = _load_config()
+
+    if not DOWNLOADS:
+        DOWNLOADS = list(_CONFIG.get("downloads", []))
+    if not DATASET_TO_PATH:
+        DATASET_TO_PATH = dict(_CONFIG.get("datasets", {}))
+
+    return _CONFIG
 
 
-# Harmonizome class
-# -----------------------------------------------------------------------------
+def _get_downloads() -> list[str]:
+    """Return the known dataset download targets."""
+    _ensure_config_loaded()
+    return DOWNLOADS
+
+
+def _get_dataset_to_path() -> dict[str, str]:
+    """Return the API dataset-name to path mapping."""
+    _ensure_config_loaded()
+    return DATASET_TO_PATH
+
+
+class _LazyDatasetNames(Set[str]):
+    """Resolve the dataset-name collection only when it is first iterated."""
+
+    def __contains__(self, value: object) -> bool:
+        return value in _get_dataset_to_path()
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(_get_dataset_to_path())
+
+    def __len__(self) -> int:
+        return len(_get_dataset_to_path())
 
 
 class GeneData:
+    """Container for one gene record and its Harmonizome associations."""
+
     def __init__(self, gene_info: dict[str, Any]) -> None:
         self.gene_info = gene_info
         self.associations = gene_info.get("associations", [])
@@ -170,15 +210,15 @@ class GeneData:
     def save(
         self, path: str, format: str = "json", dataset: Optional[str] = None
     ) -> None:
-        assocs = self.get_associations(dataset)
-        rows = [self._association_to_row(assoc) for assoc in assocs]
+        output_path = Path(path)
+        rows = [
+            self._association_to_row(assoc) for assoc in self.get_associations(dataset)
+        ]
         if format == "json":
-            with open(path, "w") as f:
-                json.dump(rows, f, indent=2)
+            with output_path.open("w", encoding="utf-8") as file_handle:
+                json.dump(rows, file_handle, indent=2)
         elif format == "csv":
-            import pandas as pd
-
-            pd.DataFrame(rows).to_csv(path, index=False)
+            pd.DataFrame(rows).to_csv(output_path, index=False)
         else:
             raise ValueError("format must be 'json' or 'csv'")
 
@@ -188,17 +228,16 @@ class GeneData:
         'gene_set', 'dataset', 'thresholdValue', 'standardizedValue'.
         Optionally filter by dataset name.
         """
-        assocs = self.get_associations(dataset)
-        rows = [self._association_to_row(assoc) for assoc in assocs]
-        import pandas as pd
-
+        rows = [
+            self._association_to_row(assoc) for assoc in self.get_associations(dataset)
+        ]
         return pd.DataFrame(rows)
 
 
 class Harmonizome:
 
     __version__ = VERSION
-    DATASETS = DATASET_TO_PATH.keys()
+    DATASETS = _LazyDatasetNames()
 
     @staticmethod
     def _build_association_group(
@@ -265,6 +304,82 @@ class Harmonizome:
             "datasets": functional_associations,
         }
 
+    @staticmethod
+    def _format_gene_info(
+        gene_info: dict[str, Any], gene_symbol: str
+    ) -> dict[str, Any]:
+        """Normalize gene metadata into the public response shape."""
+        return {
+            "symbol": gene_info.get("symbol", gene_symbol),
+            "name": gene_info.get("name", DEFAULT_GENE_INFO["name"]),
+            "description": gene_info.get(
+                "description", DEFAULT_GENE_INFO["description"]
+            ),
+            "ncbi_id": gene_info.get("ncbiEntrezGeneId", "Unknown"),
+        }
+
+    @staticmethod
+    def _build_fallback_gene_info(gene_symbol: str) -> dict[str, Any]:
+        """Return a stable fallback payload when gene metadata lookup fails."""
+        return {"symbol": gene_symbol, **DEFAULT_GENE_INFO}
+
+    @classmethod
+    def _build_functional_associations_response(
+        cls,
+        gene_info: dict[str, Any],
+        gene_symbol: str,
+        grouped_annotations: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Assemble the public functional-associations response."""
+        return {
+            "gene_info": cls._format_gene_info(gene_info, gene_symbol),
+            "functional_associations": cls._format_functional_associations_from_grouped_data(
+                grouped_annotations
+            ),
+        }
+
+    @staticmethod
+    def _group_api_associations_by_dataset(
+        gene_symbol: str,
+        associations: list[dict[str, Any]],
+        datasets: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        """Group API association records by dataset and direction."""
+        dataset_associations: dict[str, Any] = {}
+
+        for assoc in associations:
+            gene_set = assoc.get("geneSet", {})
+            gene_set_name, dataset_name = GeneData._parse_gene_set(assoc)
+            dataset_name = dataset_name or "Unknown Dataset"
+
+            if datasets and dataset_name not in datasets:
+                continue
+
+            if dataset_name not in dataset_associations:
+                dataset_associations[dataset_name] = {
+                    "increased": [],
+                    "decreased": [],
+                    "summary": f"Associations for {gene_symbol} in {dataset_name}",
+                }
+
+            threshold_value = assoc.get("thresholdValue", 0)
+            standardized_value = assoc.get("standardizedValue", 0)
+            score = standardized_value if standardized_value != 0 else threshold_value
+
+            association_item = {
+                "name": gene_set_name or gene_set.get("name", "Unknown"),
+                "score": score,
+                "gene_set_id": gene_set.get("id", ""),
+                "dataset": dataset_name,
+            }
+
+            if score > 0:
+                dataset_associations[dataset_name]["increased"].append(association_item)
+            elif score < 0:
+                dataset_associations[dataset_name]["decreased"].append(association_item)
+
+        return dataset_associations
+
     @classmethod
     def get(
         cls, entity: str, name: Optional[str] = None, start_at: Optional[int] = None
@@ -308,7 +423,8 @@ class Harmonizome:
             if resp.lower() != "y":
                 return
 
-        download_targets = what if what is not None else DOWNLOADS
+        dataset_to_path = _get_dataset_to_path()
+        download_targets = what if what is not None else _get_downloads()
 
         for dataset in datasets:
             if dataset not in cls.DATASETS:
@@ -321,7 +437,7 @@ class Harmonizome:
             dataset_dir.mkdir(exist_ok=True)
 
             for dl in download_targets:
-                path = DATASET_TO_PATH[dataset]
+                path = dataset_to_path[dataset]
                 url = f"{DOWNLOAD_URL}/{path}/{dl}"
 
                 try:
@@ -330,7 +446,7 @@ class Harmonizome:
                     # Not every dataset has all downloads.
                     logger.warning("Skipping %s: HTTP Error %s", dl, e.code)
                     continue
-                except Exception as e:
+                except URLError as e:
                     logger.warning("Skipping %s: %s", dl, e)
                     continue
 
@@ -384,66 +500,20 @@ class Harmonizome:
         # Get gene info with associations
         try:
             gene_info = cls.get_gene_with_associations(gene_symbol)
-        except Exception as e:
+        except (HTTPError, URLError, json.JSONDecodeError) as e:
             logger.warning(f"Could not get gene info for {gene_symbol}: {e}")
-            gene_info = {
-                "symbol": gene_symbol,
-                "name": "Unknown",
-                "description": "No description available",
-            }
+            gene_info = cls._build_fallback_gene_info(gene_symbol)
 
-        # Process associations from API response
-        associations = gene_info.get("associations", [])
-
-        # Group associations by dataset
-        dataset_associations = {}
-
-        for assoc in associations:
-            gene_set = assoc.get("geneSet", {})
-            gene_set_name, dataset_name = GeneData._parse_gene_set(assoc)
-            dataset_name = dataset_name or "Unknown Dataset"
-
-            # Filter by specific datasets if requested
-            if datasets and dataset_name not in datasets:
-                continue
-
-            if dataset_name not in dataset_associations:
-                dataset_associations[dataset_name] = {
-                    "increased": [],
-                    "decreased": [],
-                    "summary": f"Associations for {gene_symbol} in {dataset_name}",
-                }
-
-            # Extract score and direction
-            threshold_value = assoc.get("thresholdValue", 0)
-            standardized_value = assoc.get("standardizedValue", 0)
-
-            # Use standardized value if available, otherwise threshold
-            score = standardized_value if standardized_value != 0 else threshold_value
-
-            association_item = {
-                "name": gene_set_name or gene_set.get("name", "Unknown"),
-                "score": score,
-                "gene_set_id": gene_set.get("id", ""),
-                "dataset": dataset_name,
-            }
-
-            if score > 0:
-                dataset_associations[dataset_name]["increased"].append(association_item)
-            elif score < 0:
-                dataset_associations[dataset_name]["decreased"].append(association_item)
-
-        return {
-            "gene_info": {
-                "symbol": gene_info.get("symbol", gene_symbol),
-                "name": gene_info.get("name", "Unknown"),
-                "description": gene_info.get("description", "No description available"),
-                "ncbi_id": gene_info.get("ncbiEntrezGeneId", "Unknown"),
-            },
-            "functional_associations": cls._format_functional_associations_from_grouped_data(
-                dataset_associations
-            ),
-        }
+        dataset_associations = cls._group_api_associations_by_dataset(
+            gene_symbol=gene_symbol,
+            associations=gene_info.get("associations", []),
+            datasets=datasets,
+        )
+        return cls._build_functional_associations_response(
+            gene_info=gene_info,
+            gene_symbol=gene_symbol,
+            grouped_annotations=dataset_associations,
+        )
 
     @classmethod
     def get_gene_with_associations(cls, gene_symbol: str) -> dict[str, Any]:
@@ -483,19 +553,133 @@ class Harmonizome:
         results = {}
 
         for dataset in datasets:
-            try:
-                dataset_annotations = cls._get_gene_dataset_annotations_from_files(
-                    gene_symbol, dataset
-                )
-                if dataset_annotations:
-                    results[dataset] = dataset_annotations
-            except Exception as e:
-                logger.debug(
-                    f"Error processing dataset '{dataset}' for gene '{gene_symbol}': {e}"
-                )
-                continue
+            dataset_annotations = cls._get_gene_dataset_annotations_from_files(
+                gene_symbol, dataset
+            )
+            if dataset_annotations:
+                results[dataset] = dataset_annotations
 
         return results
+
+    @classmethod
+    def _download_dataset_annotation_files(
+        cls, dataset: str
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Download the files needed to recover one dataset's annotations."""
+        gene_matrix_file = None
+        attribute_list_file = None
+
+        for filename in cls.download([dataset], GENE_MATRIX_DOWNLOADS):
+            if "gene_attribute_matrix.txt" in filename:
+                gene_matrix_file = filename
+            elif "attribute_list_entries.txt" in filename:
+                attribute_list_file = filename
+
+        return gene_matrix_file, attribute_list_file
+
+    @staticmethod
+    def _get_gene_row_from_matrix(
+        matrix_df: pd.DataFrame, gene_symbol: str, dataset: str
+    ) -> Optional[pd.Series]:
+        """Locate the matrix row that corresponds to the requested gene."""
+        for index_value in matrix_df.index:
+            try:
+                gene_data = json.loads(index_value)
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            if (
+                isinstance(gene_data, list)
+                and gene_data
+                and gene_data[0] == gene_symbol
+            ):
+                return matrix_df.loc[index_value]
+
+        logger.debug(f"Gene '{gene_symbol}' not found in dataset '{dataset}'")
+        return None
+
+    @staticmethod
+    def _load_attribute_names(attribute_list_file: Optional[str]) -> dict[str, str]:
+        """Map attribute identifiers to readable names when the sidecar file exists."""
+        if attribute_list_file is None:
+            return {}
+
+        try:
+            attribute_frame = pd.read_csv(
+                attribute_list_file, sep="\t", encoding="latin-1"
+            )
+        except (
+            FileNotFoundError,
+            pd.errors.EmptyDataError,
+            pd.errors.ParserError,
+            UnicodeDecodeError,
+        ) as e:
+            logger.debug(f"Could not read attribute list '{attribute_list_file}': {e}")
+            return {}
+
+        if len(attribute_frame.columns) < 2:
+            return {}
+
+        attribute_names: dict[str, str] = {}
+        for _, row in attribute_frame.iterrows():
+            attribute_id = str(row.iloc[0])
+            try:
+                attribute_data = json.loads(row.iloc[0])
+            except (json.JSONDecodeError, TypeError):
+                attribute_names[attribute_id] = str(row.iloc[1])
+                continue
+
+            attribute_name = (
+                attribute_data[0]
+                if isinstance(attribute_data, list) and attribute_data
+                else attribute_id
+            )
+            attribute_names[attribute_id] = str(attribute_name)
+
+        return attribute_names
+
+    @staticmethod
+    def _build_annotation_summary(
+        summary: str, gene_row: pd.Series, attribute_names: dict[str, str]
+    ) -> Optional[dict[str, Any]]:
+        """Convert one matrix row into grouped positive and negative associations."""
+        associations: list[dict[str, Any]] = []
+        increased_associations: list[dict[str, Any]] = []
+        decreased_associations: list[dict[str, Any]] = []
+
+        for attr_id, score in gene_row.items():
+            if pd.isna(score) or score == 0:
+                continue
+
+            try:
+                score_float = float(score)
+            except (ValueError, TypeError):
+                continue
+
+            association = {
+                "name": attribute_names.get(attr_id, attr_id),
+                "score": score_float,
+                "attribute_id": attr_id,
+            }
+            associations.append(association)
+
+            if score_float > 0:
+                increased_associations.append(association)
+            elif score_float < 0:
+                decreased_associations.append(association)
+
+        if not associations:
+            return None
+
+        return {
+            "summary": summary,
+            "associations": associations,
+            "increased_associations": increased_associations,
+            "decreased_associations": decreased_associations,
+            "total_associations": len(associations),
+            "increased_count": len(increased_associations),
+            "decreased_count": len(decreased_associations),
+        }
 
     @classmethod
     def _get_gene_dataset_annotations_from_files(
@@ -510,131 +694,27 @@ class Harmonizome:
         Returns:
             Dictionary with annotation data for the dataset
         """
-        try:
-            # Get dataset info
-            dataset_info = cls.get("dataset", dataset)
-            summary = dataset_info.get(
-                "description", f"Associations for {gene_symbol} in {dataset}"
-            )
+        dataset_info = cls.get("dataset", dataset)
+        summary = dataset_info.get(
+            "description", f"Associations for {gene_symbol} in {dataset}"
+        )
 
-            # Download the necessary files for this dataset
-            gene_matrix_file = None
-            attribute_list_file = None
-
-            for filename in cls.download(
-                [dataset],
-                ["gene_attribute_matrix.txt.gz", "attribute_list_entries.txt.gz"],
-            ):
-                if "gene_attribute_matrix.txt" in filename:
-                    gene_matrix_file = filename
-                elif "attribute_list_entries.txt" in filename:
-                    attribute_list_file = filename
-
-            if not gene_matrix_file:
-                logger.debug(
-                    f"Could not download gene-attribute matrix for dataset '{dataset}'"
-                )
-                return None
-
-            # Read the gene-attribute matrix
-            import pandas as pd
-
-            # Read the matrix file
-            matrix_df = _read_as_dataframe(gene_matrix_file)
-
-            # Check if the gene exists in the matrix
-            # Genes are stored as JSON strings like ["GENE_NAME", "na", "ID"]
-            gene_found = False
-            gene_row = None
-
-            for idx in matrix_df.index:
-                try:
-                    import json
-
-                    gene_data = json.loads(idx)
-                    if gene_data[0] == gene_symbol:
-                        gene_found = True
-                        gene_row = matrix_df.loc[idx]
-                        break
-                except (json.JSONDecodeError, IndexError):
-                    continue
-
-            if not gene_found:
-                logger.debug(f"Gene '{gene_symbol}' not found in dataset '{dataset}'")
-                return None
-
-            # Read attribute list if available
-            attribute_names = {}
-            if attribute_list_file:
-                try:
-                    attr_df = pd.read_csv(
-                        attribute_list_file, sep="\t", encoding="latin-1"
-                    )
-                    if len(attr_df.columns) >= 2:
-                        # Attributes are also stored as JSON strings
-                        for _, row in attr_df.iterrows():
-                            try:
-                                attr_data = json.loads(row.iloc[0])
-                                attr_id = row.iloc[0]  # Use the full JSON string as ID
-                                attr_name = (
-                                    attr_data[0]
-                                    if len(attr_data) > 0
-                                    else str(row.iloc[0])
-                                )
-                                attribute_names[attr_id] = attr_name
-                            except (json.JSONDecodeError, IndexError):
-                                # Fallback to plain text
-                                attribute_names[str(row.iloc[0])] = str(row.iloc[1])
-                except Exception as e:
-                    logger.debug(
-                        f"Could not read attribute list for dataset '{dataset}': {e}"
-                    )
-
-            # Extract associations
-            associations = []
-            increased_associations = []
-            decreased_associations = []
-
-            for attr_id, score in gene_row.items():
-                if pd.notna(score) and score != 0:  # Skip missing or zero values
-                    try:
-                        score_float = float(score)
-                        attr_name = attribute_names.get(attr_id, attr_id)
-
-                        association = {
-                            "name": attr_name,
-                            "score": score_float,
-                            "attribute_id": attr_id,
-                        }
-
-                        associations.append(association)
-
-                        if score_float > 0:
-                            increased_associations.append(association)
-                        elif score_float < 0:
-                            decreased_associations.append(association)
-
-                    except (ValueError, TypeError):
-                        continue
-
-            if not associations:
-                return None
-
-            return {
-                "summary": summary,
-                "associations": associations,
-                "increased_associations": increased_associations,
-                "decreased_associations": decreased_associations,
-                "total_associations": len(associations),
-                "increased_count": len(increased_associations),
-                "decreased_count": len(decreased_associations),
-            }
-
-        except Exception as e:
+        gene_matrix_file, attribute_list_file = cls._download_dataset_annotation_files(
+            dataset
+        )
+        if not gene_matrix_file:
             logger.debug(
-                f"Error processing dataset '{dataset}' for gene '{gene_symbol}': {e}"
+                f"Could not download gene-attribute matrix for dataset '{dataset}'"
             )
             return None
+
+        matrix_df = _read_as_dataframe(gene_matrix_file)
+        gene_row = cls._get_gene_row_from_matrix(matrix_df, gene_symbol, dataset)
+        if gene_row is None:
+            return None
+
+        attribute_names = cls._load_attribute_names(attribute_list_file)
+        return cls._build_annotation_summary(summary, gene_row, attribute_names)
 
     @classmethod
     def get_gene_associations_summary(
@@ -696,36 +776,23 @@ class Harmonizome:
             - gene_info: Basic gene information
             - functional_associations: List of datasets with associations
         """
-        # Get gene info
         try:
             gene_info = cls.get("gene", gene_symbol)
-        except Exception as e:
+        except (HTTPError, URLError, json.JSONDecodeError) as e:
             logger.warning(f"Could not get gene info for {gene_symbol}: {e}")
-            gene_info = {
-                "symbol": gene_symbol,
-                "name": "Unknown",
-                "description": "No description available",
-            }
+            gene_info = cls._build_fallback_gene_info(gene_symbol)
 
-        # Get functional annotations
         if use_download:
             annotations = cls.download_gene_functional_annotations(
                 gene_symbol, datasets
             )
         else:
             return cls.get_gene_functional_annotations(gene_symbol, datasets)
-
-        return {
-            "gene_info": {
-                "symbol": gene_info.get("symbol", gene_symbol),
-                "name": gene_info.get("name", "Unknown"),
-                "description": gene_info.get("description", "No description available"),
-                "ncbi_id": gene_info.get("ncbiEntrezGeneId", "Unknown"),
-            },
-            "functional_associations": cls._format_functional_associations_from_grouped_data(
-                annotations
-            ),
-        }
+        return cls._build_functional_associations_response(
+            gene_info=gene_info,
+            gene_symbol=gene_symbol,
+            grouped_annotations=annotations,
+        )
 
     @classmethod
     def get_gene_data(cls, gene_symbol: str, use_cache: bool = False) -> GeneData:
@@ -740,10 +807,6 @@ class Harmonizome:
         gene_symbol: str,
     ) -> dict[str, Any]:
         return Harmonizome.get_gene_with_associations(gene_symbol)
-
-
-# Utility functions
-# -------------------------------------------------------------------------
 
 
 def _get_with_cursor(entity: str, start_at: int) -> dict[str, Any]:
@@ -769,15 +832,14 @@ def _get_next(response: dict[str, Any]) -> Optional[int]:
     return None
 
 
-# This function was adopted from here: http://stackoverflow.com/a/15353312.
 def _download_and_decompress_file(
     response: BinaryIO, filename: Union[Path, str]
 ) -> None:
-    """Downloads and decompresses a single file from a response object."""
+    """Write one gzip-compressed API download to its decompressed on-disk form."""
     compressed_file = BytesIO(response.read())
     decompressed_file = gzip.GzipFile(fileobj=compressed_file)
-
-    with open(filename, "wb+") as outfile:
+    output_path = Path(filename)
+    with output_path.open("wb") as outfile:
         outfile.write(decompressed_file.read())
 
 
@@ -789,9 +851,9 @@ def _getfshape(
 ) -> tuple[int, int]:
     """Fast and efficient way of finding row/col height of file"""
     open_kwargs = {} if open_args is None else dict(open_args)
-    with open(fn, "r", newline=row_sep, **open_kwargs) as f:
-        col_size = f.readline().count(col_sep) + 1
-        row_size = sum(1 for line in f) + 1
+    with Path(fn).open("r", newline=row_sep, **open_kwargs) as file_handle:
+        col_size = file_handle.readline().count(col_sep) + 1
+        row_size = sum(1 for line in file_handle) + 1
         return row_size, col_size
 
 
@@ -820,8 +882,6 @@ def _parse(
     Returns:
         (column_names, columns, index_names, index, data)
     """
-    import numpy as np
-
     if index_fmt is None:
         index_fmt = np.ndarray
     if data_fmt is None:
@@ -844,15 +904,17 @@ def _parse(
 
     open_kwargs = {} if open_args is None else dict(open_args)
 
-    with open(fn, "r", newline=row_sep, **open_kwargs) as fh:
-        header = np.array([next(fh).strip().split(col_sep) for _ in range(column_size)])
+    with Path(fn).open("r", newline=row_sep, **open_kwargs) as file_handle:
+        header = np.array(
+            [next(file_handle).strip().split(col_sep) for _ in range(column_size)]
+        )
 
         column_names = header[:column_size, index_size - 1]
         index_names = header[column_size - 1, :index_size]
 
         columns[:, :] = header[:column_size, index_size:]
 
-        for ind, line in enumerate(fh):
+        for ind, line in enumerate(file_handle):
             lh = line.strip().split(col_sep)
             index[ind, :] = lh[:index_size]
             data[ind, :] = lh[index_size:]
@@ -869,10 +931,6 @@ def _parse_df(
     df_args: Optional[dict[str, Any]] = None,
     **kwargs: Any,
 ) -> pd.DataFrame:
-    import numpy as np
-    import pandas as pd
-    from scipy.sparse import lil_matrix
-
     data_fmt = lil_matrix if sparse else np.ndarray
     dataframe_kwargs = {} if df_args is None else dict(df_args)
     (
@@ -921,6 +979,7 @@ def _parse_df(
 
 
 def _df_column_uniquify(df: pd.DataFrame) -> pd.DataFrame:
+    """Append numeric suffixes to duplicate column names."""
     df_columns = df.columns
     new_columns = []
     for item in df_columns:
@@ -942,7 +1001,7 @@ def _json_ind_no_slash(ind_names: Any, ind: Any) -> tuple[str, list[str]]:
 
 
 def _read_as_dataframe(fn: str) -> pd.DataFrame:
-    """Standard loading of dataframe"""
+    """Load one Harmonizome text artifact into a pandas DataFrame."""
     if fn.endswith("gene_attribute_matrix.txt"):
         return _df_column_uniquify(
             _parse_df(
@@ -956,17 +1015,13 @@ def _read_as_dataframe(fn: str) -> pd.DataFrame:
     elif fn.endswith("gene_list_terms.txt") or fn.endswith(
         "attribute_list_entries.txt"
     ):
-        import pandas as pd
-
         return pd.read_table(fn, encoding="latin-1", index_col=None)
     else:
-        raise Exception("Unable to parse this file into a dataframe.")
+        raise ValueError("Unable to parse this file into a dataframe.")
 
 
-def _read_as_sparse_dataframe(
-    fn: str, blocksize: float = 10e6, fill_value: int = 0
-) -> pd.DataFrame:
-    """Efficient loading sparse dataframe"""
+def _read_as_sparse_dataframe(fn: str, fill_value: int = 0) -> pd.DataFrame:
+    """Load the gene-attribute matrix as a sparse pandas DataFrame."""
     if fn.endswith("gene_attribute_matrix.txt"):
         return _df_column_uniquify(
             _parse_df(
@@ -979,4 +1034,4 @@ def _read_as_sparse_dataframe(
             )
         )
     else:
-        raise Exception("Unable to parse this file into a dataframe.")
+        raise ValueError("Unable to parse this file into a dataframe.")
