@@ -36,7 +36,7 @@ for df in Harmonizome.download_df(['ENCODE'], sparse=False):
 - **Data Download**: Download complete datasets (~30GB total)
 - **DataFrame Support**: Load data directly as pandas DataFrames
 - **Sparse Matrix Support**: Efficient handling of large sparse datasets
-- **Python 2/3 Compatibility**: Works with both Python 2.X and 3.X
+- **Python 3.9+ Support**: Targets the package minimum version and newer
 
 ## API Reference
 

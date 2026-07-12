@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Any, Optional
 
 from harmonizome import Harmonizome
 
@@ -79,7 +80,7 @@ def list_datasets() -> None:
         print_dataset_item(i, dataset, short_code)
 
 
-def format_value(key: str, value) -> str:
+def format_value(key: str, value: Any) -> str:
     """Format a value for display based on its type and key."""
     if isinstance(value, str):
         # Don't truncate descriptions
@@ -185,7 +186,7 @@ def get_entity_info(entity_type: str, name: str) -> None:
         sys.exit(1)
 
 
-def find_dataset_by_partial_name(partial_name: str) -> list:
+def find_dataset_by_partial_name(partial_name: str) -> list[str]:
     """Find datasets that contain the partial name."""
     from harmonizome.harmonizome import DATASET_TO_PATH
 
@@ -196,16 +197,20 @@ def find_dataset_by_partial_name(partial_name: str) -> list:
     return matching_datasets
 
 
-def download_datasets(datasets: list, output_dir: str = None) -> None:
+def download_datasets(
+    datasets: list[str], output_dir: Optional[str] = None
+) -> None:
     """Download specified datasets."""
     print_header("Harmonizome Dataset Download")
 
     if output_dir:
         print_info(f"Output directory: {output_dir}")
         Path(output_dir).mkdir(exist_ok=True)
+        original_working_directory = Path.cwd()
         os.chdir(output_dir)
     else:
         print_info("Output directory: current directory")
+        original_working_directory = None
 
     # Check if any datasets need to be expanded (e.g., "ENCODE" -> all ENCODE datasets)
     expanded_datasets = []
@@ -235,10 +240,15 @@ def download_datasets(datasets: list, output_dir: str = None) -> None:
     except Exception as e:
         print_error(f"Error downloading datasets: {e}")
         sys.exit(1)
+    finally:
+        if original_working_directory is not None:
+            os.chdir(original_working_directory)
 
 
 def get_functional_associations(
-    gene_symbol: str, datasets: list = None, output_file: str = None
+    gene_symbol: str,
+    datasets: Optional[list[str]] = None,
+    output_file: Optional[str] = None,
 ) -> None:
     """Get functional associations for a gene."""
     print_header(f"Functional Associations for {gene_symbol}")

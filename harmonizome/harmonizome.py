@@ -4,10 +4,10 @@ import gzip
 import json
 import logging
 import ssl
-from pathlib import Path
-from typing import Any, BinaryIO, Dict, List, Optional, Tuple, Union
-
+from collections.abc import Iterator
 from io import BytesIO
+from pathlib import Path
+from typing import Any, BinaryIO, Optional, Union
 from urllib.error import HTTPError
 from urllib.parse import quote_plus
 from urllib.request import urlopen
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 class Enum(set):
     """Simple Enum shim used by the historical public API."""
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> str:
         if name in self:
             return name
         raise AttributeError
@@ -44,7 +44,7 @@ class Entity(Enum):
     RESOURCE = "resource"
 
 
-def json_from_url(url: str) -> Dict[str, Any]:
+def json_from_url(url: str) -> dict[str, Any]:
     """Returns API response after decoding and loading JSON.
 
     Note: Uses unverified SSL context due to certificate verification issues
@@ -99,7 +99,7 @@ DOWNLOAD_URL = "https://maayanlab.cloud/static/hdfs/harmonizome/data"
 # This config objects pulls the names of the datasets, their directories, and
 # the possible downloads from the API. This allows us to add new datasets and
 # downloads without breaking this file.
-def _load_config() -> Dict[str, Any]:
+def _load_config() -> dict[str, Any]:
     """Load configuration from API with SSL fallback."""
     try:
         config = json_from_url(API_URL + "/dark/script_config")
@@ -127,12 +127,12 @@ DATASET_TO_PATH = config.get("datasets", {})
 
 
 class GeneData:
-    def __init__(self, gene_info: Dict[str, Any]) -> None:
+    def __init__(self, gene_info: dict[str, Any]) -> None:
         self.gene_info = gene_info
         self.associations = gene_info.get("associations", [])
 
     @staticmethod
-    def _parse_gene_set(assoc: Dict[str, Any]) -> Tuple[str, str]:
+    def _parse_gene_set(assoc: dict[str, Any]) -> tuple[str, str]:
         """Extract gene-set and dataset names from either API payload shape."""
         gene_set = assoc.get("geneSet", {})
         gene_set_full_name = gene_set.get("name", "")
@@ -147,7 +147,7 @@ class GeneData:
         return gene_set_name, dataset_name or parsed_dataset_name
 
     @staticmethod
-    def _association_to_row(assoc: Dict[str, Any]) -> Dict[str, Any]:
+    def _association_to_row(assoc: dict[str, Any]) -> dict[str, Any]:
         """Normalize one API association into a tabular row."""
         gene_set_name, dataset_name = GeneData._parse_gene_set(assoc)
 
@@ -158,7 +158,7 @@ class GeneData:
             "standardizedValue": assoc.get("standardizedValue"),
         }
 
-    def get_associations(self, dataset: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get_associations(self, dataset: Optional[str] = None) -> list[dict[str, Any]]:
         if dataset is None:
             return self.associations
         return [
@@ -202,8 +202,8 @@ class Harmonizome:
 
     @staticmethod
     def _build_association_group(
-        associations: List[Dict[str, Any]], association_type: str
-    ) -> Dict[str, Any]:
+        associations: list[dict[str, Any]], association_type: str
+    ) -> dict[str, Any]:
         """Format one directional association group for output."""
         return {
             "type": association_type,
@@ -217,8 +217,8 @@ class Harmonizome:
 
     @classmethod
     def _format_functional_associations_from_grouped_data(
-        cls, grouped_data: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        cls, grouped_data: dict[str, Any]
+    ) -> dict[str, Any]:
         """Convert grouped dataset associations into the public response format."""
         functional_associations = []
         total_associations = 0
@@ -266,7 +266,9 @@ class Harmonizome:
         }
 
     @classmethod
-    def get(cls, entity, name=None, start_at=None):
+    def get(
+        cls, entity: str, name: Optional[str] = None, start_at: Optional[int] = None
+    ) -> dict[str, Any]:
         """Returns a single entity or a list, depending on if a name is
         provided. If no name is provided and start_at is specified, returns a
         list starting at that cursor position.
@@ -274,14 +276,12 @@ class Harmonizome:
         if name:
             name = quote_plus(name)
             return _get_by_name(entity, name)
-        if start_at is not None and type(start_at) is int:
+        if isinstance(start_at, int):
             return _get_with_cursor(entity, start_at)
-        url = "%s/%s/%s" % (API_URL, VERSION, entity)
-        result = json_from_url(url)
-        return result
+        return json_from_url(f"{API_URL}/{VERSION}/{entity}")
 
     @classmethod
-    def next(cls, response):
+    def next(cls, response: dict[str, Any]) -> dict[str, Any]:
         """Returns the next set of entities based on a previous API response."""
         start_at = _get_next(response)
         entity = _get_entity(response)
@@ -290,9 +290,9 @@ class Harmonizome:
     @classmethod
     def download(
         cls,
-        datasets: Optional[List[str]] = None,
-        what: Optional[List[str]] = None,
-    ):
+        datasets: Optional[list[str]] = None,
+        what: Optional[list[str]] = None,
+    ) -> Iterator[str]:
         """For each dataset, creates a directory and downloads files into it."""
         # Why not check `if not datasets`? Because in principle, a user could
         # call `download([])`, which should download nothing, not everything.
@@ -313,8 +313,8 @@ class Harmonizome:
         for dataset in datasets:
             if dataset not in cls.DATASETS:
                 msg = (
-                    '"%s" is not a valid dataset name. Check the `DATASETS`'
-                    " property for a complete list of names." % dataset
+                    f'"{dataset}" is not a valid dataset name. Check the `DATASETS` '
+                    "property for a complete list of names."
                 )
                 raise AttributeError(msg)
             dataset_dir = Path(dataset)
@@ -322,7 +322,7 @@ class Harmonizome:
 
             for dl in download_targets:
                 path = DATASET_TO_PATH[dataset]
-                url = "%s/%s/%s" % (DOWNLOAD_URL, path, dl)
+                url = f"{DOWNLOAD_URL}/{path}/{dl}"
 
                 try:
                     response = download_from_url(url)
@@ -349,7 +349,13 @@ class Harmonizome:
                 yield str(file_path)
 
     @classmethod
-    def download_df(cls, datasets=None, what=None, sparse=False, **kwargs):
+    def download_df(
+        cls,
+        datasets: Optional[list[str]] = None,
+        what: Optional[list[str]] = None,
+        sparse: bool = False,
+        **kwargs: Any,
+    ) -> Iterator[pd.DataFrame]:
         for file in cls.download(datasets, what):
             if sparse:
                 yield _read_as_sparse_dataframe(file, **kwargs)
@@ -358,8 +364,8 @@ class Harmonizome:
 
     @classmethod
     def get_gene_functional_annotations(
-        cls, gene_symbol: str, datasets: Optional[List[str]] = None
-    ) -> Dict[str, Any]:
+        cls, gene_symbol: str, datasets: Optional[list[str]] = None
+    ) -> dict[str, Any]:
         """Get functional annotations for a gene using the Harmonizome API.
 
         This method uses the API directly without downloading any files.
@@ -440,7 +446,7 @@ class Harmonizome:
         }
 
     @classmethod
-    def get_gene_with_associations(cls, gene_symbol: str) -> Dict[str, Any]:
+    def get_gene_with_associations(cls, gene_symbol: str) -> dict[str, Any]:
         """Get gene information with associations using the API.
 
         This uses the showAssociations=true parameter to get functional
@@ -453,13 +459,12 @@ class Harmonizome:
             Dictionary with gene info and associations
         """
         name = quote_plus(gene_symbol)
-        url = "%s/%s/gene/%s?showAssociations=true" % (API_URL, VERSION, name)
-        return json_from_url(url)
+        return json_from_url(f"{API_URL}/{VERSION}/gene/{name}?showAssociations=true")
 
     @classmethod
     def _get_gene_dataset_annotations_from_api(
         cls, gene_symbol: str, dataset: str
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[dict[str, Any]]:
         """Get functional annotations for a gene in a specific dataset using API.
 
         Note: This method currently has limited functionality due to API constraints.
@@ -495,8 +500,8 @@ class Harmonizome:
 
     @classmethod
     def download_gene_functional_annotations(
-        cls, gene_symbol: str, datasets: Optional[List[str]] = None
-    ) -> Dict[str, Any]:
+        cls, gene_symbol: str, datasets: Optional[list[str]] = None
+    ) -> dict[str, Any]:
         """Download and get all functional annotations for a gene across specified datasets.
 
         This method downloads the necessary data files and extracts associations
@@ -532,7 +537,7 @@ class Harmonizome:
     @classmethod
     def _get_gene_dataset_annotations_from_files(
         cls, gene_symbol: str, dataset: str
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[dict[str, Any]]:
         """Get functional annotations for a gene in a specific dataset using downloaded files.
 
         Args:
@@ -670,8 +675,8 @@ class Harmonizome:
 
     @classmethod
     def _extract_gene_set_associations(
-        cls, gene_set_detail: Dict[str, Any], gene_symbol: str
-    ) -> List[Dict[str, Any]]:
+        cls, gene_set_detail: dict[str, Any], gene_symbol: str
+    ) -> list[dict[str, Any]]:
         """Extract associations from gene set details.
 
         Args:
@@ -725,7 +730,7 @@ class Harmonizome:
 
     @classmethod
     def _extract_association_score(
-        cls, gene_assoc: Dict[str, Any], attr_detail: Dict[str, Any]
+        cls, gene_assoc: dict[str, Any], attr_detail: dict[str, Any]
     ) -> Optional[float]:
         """Extract the association score from gene-attribute association.
 
@@ -769,9 +774,9 @@ class Harmonizome:
     def get_gene_associations_summary(
         cls,
         gene_symbol: str,
-        datasets: Optional[List[str]] = None,
+        datasets: Optional[list[str]] = None,
         use_download: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Get a summary of all functional associations for a gene.
 
         Args:
@@ -807,9 +812,9 @@ class Harmonizome:
     def get_gene_functional_associations_formatted(
         cls,
         gene_symbol: str,
-        datasets: Optional[List[str]] = None,
+        datasets: Optional[list[str]] = None,
         use_download: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Get functional associations for a gene in Harmonizome web interface format.
 
         This method returns data structured exactly like the Harmonizome web interface,
@@ -867,7 +872,7 @@ class Harmonizome:
     @cache_to_file
     def _get_gene_with_associations_cached(
         gene_symbol: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return Harmonizome.get_gene_with_associations(gene_symbol)
 
 
@@ -875,26 +880,23 @@ class Harmonizome:
 # -------------------------------------------------------------------------
 
 
-def _get_with_cursor(entity: str, start_at: int) -> Dict[str, Any]:
+def _get_with_cursor(entity: str, start_at: int) -> dict[str, Any]:
     """Returns a list of entities based on cursor position."""
-    url = "%s/%s/%s?cursor=%s" % (API_URL, VERSION, entity, str(start_at))
-    result = json_from_url(url)
-    return result
+    return json_from_url(f"{API_URL}/{VERSION}/{entity}?cursor={start_at}")
 
 
-def _get_by_name(entity: str, name: str) -> Dict[str, Any]:
+def _get_by_name(entity: str, name: str) -> dict[str, Any]:
     """Returns a single entity based on name."""
-    url = "%s/%s/%s/%s" % (API_URL, VERSION, entity, name)
-    return json_from_url(url)
+    return json_from_url(f"{API_URL}/{VERSION}/{entity}/{name}")
 
 
-def _get_entity(response: Dict[str, Any]) -> str:
+def _get_entity(response: dict[str, Any]) -> str:
     """Returns the entity from an API response."""
     path = response["next"].split("?")[0]
     return path.split("/")[3]
 
 
-def _get_next(response: Dict[str, Any]) -> Optional[int]:
+def _get_next(response: dict[str, Any]) -> Optional[int]:
     """Returns the next property from an API response."""
     if response["next"]:
         return int(response["next"].split("=")[1])
@@ -917,8 +919,8 @@ def _getfshape(
     fn: str,
     row_sep: str = "\n",
     col_sep: str = "\t",
-    open_args: Optional[Dict[str, Any]] = None,
-) -> Tuple[int, int]:
+    open_args: Optional[dict[str, Any]] = None,
+) -> tuple[int, int]:
     """Fast and efficient way of finding row/col height of file"""
     open_kwargs = {} if open_args is None else dict(open_args)
     with open(fn, "r", newline=row_sep, **open_kwargs) as f:
@@ -931,15 +933,15 @@ def _parse(
     fn: str,
     column_size: int = 3,
     index_size: int = 3,
-    shape: Optional[Tuple[int, int]] = None,
+    shape: Optional[tuple[int, int]] = None,
     index_fmt: Any = None,
     data_fmt: Any = None,
     index_dtype: Any = None,
     data_dtype: Any = None,
     col_sep: str = "\t",
     row_sep: str = "\n",
-    open_args: Optional[Dict[str, Any]] = None,
-) -> Tuple[Any, Any, Any, Any, Any]:
+    open_args: Optional[dict[str, Any]] = None,
+) -> tuple[Any, Any, Any, Any, Any]:
     """
     Smart(er) parser for processing matrix formats. Evaluate size and construct
      ndframes with the right size before parsing, this allows for more efficient
@@ -998,7 +1000,7 @@ def _parse_df(
     default_fill_value: Any = None,
     column_apply: Any = None,
     index_apply: Any = None,
-    df_args: Optional[Dict[str, Any]] = None,
+    df_args: Optional[dict[str, Any]] = None,
     **kwargs: Any,
 ) -> pd.DataFrame:
     import numpy as np
@@ -1060,13 +1062,13 @@ def _df_column_uniquify(df: pd.DataFrame) -> pd.DataFrame:
         newitem = item
         while newitem in new_columns:
             counter += 1
-            newitem = "{}_{}".format(item, counter)
+            newitem = f"{item}_{counter}"
         new_columns.append(newitem)
     df.columns = new_columns
     return df
 
 
-def _json_ind_no_slash(ind_names: Any, ind: Any) -> Tuple[str, List[str]]:
+def _json_ind_no_slash(ind_names: Any, ind: Any) -> tuple[str, list[str]]:
     return (
         json.dumps([ind_name.replace("/", "|") for ind_name in ind_names]),
         [json.dumps([ii.replace("/", "|") for ii in i]) for i in ind],
