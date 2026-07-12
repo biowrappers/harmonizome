@@ -133,31 +133,44 @@ class GeneData:
         self.gene_info = gene_info
         self.associations = gene_info.get("associations", [])
 
+    @staticmethod
+    def _parse_gene_set(assoc: dict):
+        """Extract gene-set and dataset names from either API payload shape."""
+        gene_set = assoc.get('geneSet', {})
+        gene_set_full_name = gene_set.get('name', '')
+        dataset_name = gene_set.get('dataset', {}).get('name')
+
+        if '/' in gene_set_full_name:
+            gene_set_name, parsed_dataset_name = gene_set_full_name.split('/', 1)
+        else:
+            gene_set_name = gene_set_full_name
+            parsed_dataset_name = ''
+
+        return gene_set_name, dataset_name or parsed_dataset_name
+
+    @staticmethod
+    def _association_to_row(assoc: dict) -> dict:
+        """Normalize one API association into a tabular row."""
+        gene_set_name, dataset_name = GeneData._parse_gene_set(assoc)
+
+        return {
+            "gene_set": gene_set_name,
+            "dataset": dataset_name,
+            "thresholdValue": assoc.get('thresholdValue'),
+            "standardizedValue": assoc.get('standardizedValue'),
+        }
+
     def get_associations(self, dataset: str = None):
         if dataset is None:
             return self.associations
         return [
             assoc for assoc in self.associations
-            if assoc.get('geneSet', {}).get('dataset', {}).get('name') == dataset
+            if self._parse_gene_set(assoc)[1] == dataset
         ]
 
     def save(self, path: str, format: str = "json", dataset: str = None):
         assocs = self.get_associations(dataset)
-        rows = []
-        for assoc in assocs:
-            gene_set = assoc.get('geneSet', {}).get('name', '')
-            if '/' in gene_set:
-                gene_set_name, dataset_name = gene_set.split('/', 1)
-            else:
-                gene_set_name = gene_set
-                dataset_name = ''
-            row = {
-                "gene_set": gene_set_name,
-                "dataset": dataset_name,
-                "thresholdValue": assoc.get('thresholdValue'),
-                "standardizedValue": assoc.get('standardizedValue'),
-            }
-            rows.append(row)
+        rows = [self._association_to_row(assoc) for assoc in assocs]
         if format == "json":
             with open(path, "w") as f:
                 json.dump(rows, f, indent=2)
@@ -174,21 +187,7 @@ class GeneData:
         Optionally filter by dataset name.
         """
         assocs = self.get_associations(dataset)
-        rows = []
-        for assoc in assocs:
-            gene_set = assoc.get('geneSet', {}).get('name', '')
-            if '/' in gene_set:
-                gene_set_name, dataset_name = gene_set.split('/', 1)
-            else:
-                gene_set_name = gene_set
-                dataset_name = ''
-            row = {
-                "gene_set": gene_set_name,
-                "dataset": dataset_name,
-                "thresholdValue": assoc.get('thresholdValue'),
-                "standardizedValue": assoc.get('standardizedValue'),
-            }
-            rows.append(row)
+        rows = [self._association_to_row(assoc) for assoc in assocs]
         import pandas as pd
         return pd.DataFrame(rows)
 
@@ -196,6 +195,61 @@ class Harmonizome(object):
 
     __version__ = VERSION
     DATASETS = DATASET_TO_PATH.keys()
+
+    @staticmethod
+    def _build_association_group(associations: list, association_type: str) -> dict:
+        """Format one directional association group for output."""
+        return {
+            'type': association_type,
+            'count': len(associations),
+            'description': f"{len(associations)} {association_type} fitness associations",
+            'items': [
+                {'name': assoc['name'], 'score': assoc['score']}
+                for assoc in associations
+            ],
+        }
+
+    @classmethod
+    def _format_functional_associations_from_grouped_data(cls, grouped_data: dict) -> dict:
+        """Convert grouped dataset associations into the public response format."""
+        functional_associations = []
+        total_associations = 0
+        total_increased = 0
+        total_decreased = 0
+
+        for dataset_name, dataset_data in grouped_data.items():
+            dataset_entry = {
+                'dataset': dataset_name,
+                'summary': dataset_data['summary'],
+                'associations': []
+            }
+
+            increased_associations = dataset_data.get('increased', dataset_data.get('increased_associations', []))
+            decreased_associations = dataset_data.get('decreased', dataset_data.get('decreased_associations', []))
+
+            if increased_associations:
+                dataset_entry['associations'].append(
+                    cls._build_association_group(increased_associations, 'increased')
+                )
+                total_increased += len(increased_associations)
+
+            if decreased_associations:
+                dataset_entry['associations'].append(
+                    cls._build_association_group(decreased_associations, 'decreased')
+                )
+                total_decreased += len(decreased_associations)
+
+            if dataset_entry['associations']:
+                functional_associations.append(dataset_entry)
+                total_associations += len(increased_associations) + len(decreased_associations)
+
+        return {
+            'total_datasets': len(functional_associations),
+            'total_associations': total_associations,
+            'total_increased': total_increased,
+            'total_decreased': total_decreased,
+            'datasets': functional_associations
+        }
 
     @classmethod
     def get(cls, entity, name=None, start_at=None):
@@ -316,8 +370,9 @@ class Harmonizome(object):
         
         for assoc in associations:
             gene_set = assoc.get('geneSet', {})
-            dataset_name = gene_set.get('dataset', {}).get('name', 'Unknown Dataset')
-            
+            gene_set_name, dataset_name = GeneData._parse_gene_set(assoc)
+            dataset_name = dataset_name or 'Unknown Dataset'
+
             # Filter by specific datasets if requested
             if datasets and dataset_name not in datasets:
                 continue
@@ -337,7 +392,7 @@ class Harmonizome(object):
             score = standardized_value if standardized_value != 0 else threshold_value
             
             association_item = {
-                'name': gene_set.get('name', 'Unknown'),
+                'name': gene_set_name or gene_set.get('name', 'Unknown'),
                 'score': score,
                 'gene_set_id': gene_set.get('id', ''),
                 'dataset': dataset_name
@@ -347,61 +402,7 @@ class Harmonizome(object):
                 dataset_associations[dataset_name]['increased'].append(association_item)
             elif score < 0:
                 dataset_associations[dataset_name]['decreased'].append(association_item)
-        
-        # Format the data like Harmonizome web interface
-        functional_associations = []
-        total_associations = 0
-        total_increased = 0
-        total_decreased = 0
-        
-        for dataset_name, dataset_data in dataset_associations.items():
-            # Create dataset entry
-            dataset_entry = {
-                'dataset': dataset_name,
-                'summary': dataset_data['summary'],
-                'associations': []
-            }
-            
-            # Add increased associations
-            if dataset_data['increased']:
-                increased_entry = {
-                    'type': 'increased',
-                    'count': len(dataset_data['increased']),
-                    'description': f"{len(dataset_data['increased'])} increased fitness associations",
-                    'items': []
-                }
-                
-                for assoc in dataset_data['increased']:
-                    increased_entry['items'].append({
-                        'name': assoc['name'],
-                        'score': assoc['score']
-                    })
-                
-                dataset_entry['associations'].append(increased_entry)
-                total_increased += len(dataset_data['increased'])
-            
-            # Add decreased associations
-            if dataset_data['decreased']:
-                decreased_entry = {
-                    'type': 'decreased',
-                    'count': len(dataset_data['decreased']),
-                    'description': f"{len(dataset_data['decreased'])} decreased fitness associations",
-                    'items': []
-                }
-                
-                for assoc in dataset_data['decreased']:
-                    decreased_entry['items'].append({
-                        'name': assoc['name'],
-                        'score': assoc['score']
-                    })
-                
-                dataset_entry['associations'].append(decreased_entry)
-                total_decreased += len(dataset_data['decreased'])
-            
-            if dataset_entry['associations']:
-                functional_associations.append(dataset_entry)
-                total_associations += len(dataset_data['increased']) + len(dataset_data['decreased'])
-        
+
         return {
             'gene_info': {
                 'symbol': gene_info.get('symbol', gene_symbol),
@@ -409,13 +410,9 @@ class Harmonizome(object):
                 'description': gene_info.get('description', 'No description available'),
                 'ncbi_id': gene_info.get('ncbiEntrezGeneId', 'Unknown')
             },
-            'functional_associations': {
-                'total_datasets': len(functional_associations),
-                'total_associations': total_associations,
-                'total_increased': total_increased,
-                'total_decreased': total_decreased,
-                'datasets': functional_associations
-            }
+            'functional_associations': cls._format_functional_associations_from_grouped_data(
+                dataset_associations
+            )
         }
 
     @classmethod
@@ -759,60 +756,8 @@ class Harmonizome(object):
         if use_download:
             annotations = cls.download_gene_functional_annotations(gene_symbol, datasets)
         else:
-            annotations = cls.get_gene_functional_annotations(gene_symbol, datasets)
-        
-        # Format the data like Harmonizome web interface
-        functional_associations = []
-        
-        for dataset_name, dataset_data in annotations.items():
-            # Create dataset entry
-            dataset_entry = {
-                'dataset': dataset_name,
-                'summary': dataset_data['summary'],
-                'associations': []
-            }
-            
-            # Add increased associations
-            if dataset_data['increased_associations']:
-                increased_entry = {
-                    'type': 'increased',
-                    'count': len(dataset_data['increased_associations']),
-                    'description': f"{len(dataset_data['increased_associations'])} increased fitness associations",
-                    'items': []
-                }
-                
-                for assoc in dataset_data['increased_associations']:
-                    increased_entry['items'].append({
-                        'name': assoc['name'],
-                        'score': assoc['score']
-                    })
-                
-                dataset_entry['associations'].append(increased_entry)
-            
-            # Add decreased associations
-            if dataset_data['decreased_associations']:
-                decreased_entry = {
-                    'type': 'decreased',
-                    'count': len(dataset_data['decreased_associations']),
-                    'description': f"{len(dataset_data['decreased_associations'])} decreased fitness associations",
-                    'items': []
-                }
-                
-                for assoc in dataset_data['decreased_associations']:
-                    decreased_entry['items'].append({
-                        'name': assoc['name'],
-                        'score': assoc['score']
-                    })
-                
-                dataset_entry['associations'].append(decreased_entry)
-            
-            functional_associations.append(dataset_entry)
-        
-        # Calculate totals
-        total_associations = sum(d['total_associations'] for d in annotations.values())
-        total_increased = sum(d['increased_count'] for d in annotations.values())
-        total_decreased = sum(d['decreased_count'] for d in annotations.values())
-        
+            return cls.get_gene_functional_annotations(gene_symbol, datasets)
+
         return {
             'gene_info': {
                 'symbol': gene_info.get('symbol', gene_symbol),
@@ -820,13 +765,9 @@ class Harmonizome(object):
                 'description': gene_info.get('description', 'No description available'),
                 'ncbi_id': gene_info.get('ncbiEntrezGeneId', 'Unknown')
             },
-            'functional_associations': {
-                'total_datasets': len(functional_associations),
-                'total_associations': total_associations,
-                'total_increased': total_increased,
-                'total_decreased': total_decreased,
-                'datasets': functional_associations
-            }
+            'functional_associations': cls._format_functional_associations_from_grouped_data(
+                annotations
+            )
         }
 
     @classmethod
