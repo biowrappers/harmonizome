@@ -3,28 +3,14 @@
 import gzip
 import json
 import logging
-import os
 import ssl
-from typing import Any, BinaryIO, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, BinaryIO, Dict, List, Optional, Tuple, Union
 
-# Support for both Python2.X and 3.X.
-# -----------------------------------------------------------------------------
-try:
-    from io import BytesIO
-    from urllib.error import HTTPError
-    from urllib.parse import quote_plus
-    from urllib.request import urlopen
-except ImportError:
-    from urllib import quote_plus
-
-    from StringIO import StringIO as BytesIO
-    from urllib2 import HTTPError, urlopen
-
-try:
-    input_shim = raw_input
-except NameError:
-    # If `raw_input` throws a `NameError`, the user is using Python 2.X.
-    input_shim = input
+from io import BytesIO
+from urllib.error import HTTPError
+from urllib.parse import quote_plus
+from urllib.request import urlopen
 
 import pandas as pd
 
@@ -37,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class Enum(set):
-    """Simple Enum shim since Python 2.X does not have them."""
+    """Simple Enum shim used by the historical public API."""
 
     def __getattr__(self, name):
         if name in self:
@@ -196,7 +182,7 @@ class GeneData:
         else:
             raise ValueError("format must be 'json' or 'csv'")
 
-    def to_dataframe(self, dataset: str | None = None) -> pd.DataFrame:
+    def to_dataframe(self, dataset: Optional[str] = None) -> pd.DataFrame:
         """
         Return associations as a pandas DataFrame, with columns:
         'gene_set', 'dataset', 'thresholdValue', 'standardizedValue'.
@@ -209,7 +195,7 @@ class GeneData:
         return pd.DataFrame(rows)
 
 
-class Harmonizome(object):
+class Harmonizome:
 
     __version__ = VERSION
     DATASETS = DATASET_TO_PATH.keys()
@@ -302,7 +288,11 @@ class Harmonizome(object):
         return cls.get(entity=entity, start_at=start_at)
 
     @classmethod
-    def download(cls, datasets=None, what=None):
+    def download(
+        cls,
+        datasets: Optional[List[str]] = None,
+        what: Optional[List[str]] = None,
+    ):
         """For each dataset, creates a directory and downloads files into it."""
         # Why not check `if not datasets`? Because in principle, a user could
         # call `download([])`, which should download nothing, not everything.
@@ -314,9 +304,11 @@ class Harmonizome(object):
                 "Warning: You are going to download all Harmonizome "
                 "data. This is roughly 30GB. Do you accept?\n(Y/N) "
             )
-            resp = input_shim(warning)
+            resp = input(warning)
             if resp.lower() != "y":
                 return
+
+        download_targets = what if what is not None else DOWNLOADS
 
         for dataset in datasets:
             if dataset not in cls.DATASETS:
@@ -325,13 +317,10 @@ class Harmonizome(object):
                     " property for a complete list of names." % dataset
                 )
                 raise AttributeError(msg)
-            if not os.path.exists(dataset):
-                os.mkdir(dataset)
+            dataset_dir = Path(dataset)
+            dataset_dir.mkdir(exist_ok=True)
 
-            if what is None:
-                what = DOWNLOADS
-
-            for dl in what:
+            for dl in download_targets:
                 path = DATASET_TO_PATH[dataset]
                 url = "%s/%s/%s" % (DOWNLOAD_URL, path, dl)
 
@@ -339,26 +328,25 @@ class Harmonizome(object):
                     response = download_from_url(url)
                 except HTTPError as e:
                     # Not every dataset has all downloads.
-                    logging.warning("Skipping %s: HTTP Error %s" % (dl, e.code))
+                    logger.warning("Skipping %s: HTTP Error %s", dl, e.code)
                     continue
                 except Exception as e:
-                    logging.warning("Skipping %s: %s" % (dl, e))
+                    logger.warning("Skipping %s: %s", dl, e)
                     continue
 
-                filename = "%s/%s" % (dataset, dl)
-                filename = filename.replace(".gz", "")
+                file_path = dataset_dir / dl.replace(".gz", "")
 
                 if response.code != 200:
-                    logging.warning("Skipping %s: HTTP status %s" % (dl, response.code))
+                    logger.warning("Skipping %s: HTTP status %s", dl, response.code)
                     continue
 
-                if os.path.isfile(filename):
-                    logging.info("Using cached `%s`" % (filename))
+                if file_path.is_file():
+                    logger.info("Using cached `%s`", file_path)
                 else:
-                    logging.info("Downloading `%s`" % (filename))
-                    _download_and_decompress_file(response, filename)
+                    logger.info("Downloading `%s`", file_path)
+                    _download_and_decompress_file(response, file_path)
 
-                yield filename
+                yield str(file_path)
 
     @classmethod
     def download_df(cls, datasets=None, what=None, sparse=False, **kwargs):
@@ -370,8 +358,8 @@ class Harmonizome(object):
 
     @classmethod
     def get_gene_functional_annotations(
-        cls, gene_symbol: str, datasets: list = None
-    ) -> dict:
+        cls, gene_symbol: str, datasets: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
         """Get functional annotations for a gene using the Harmonizome API.
 
         This method uses the API directly without downloading any files.
@@ -391,7 +379,7 @@ class Harmonizome(object):
         try:
             gene_info = cls.get_gene_with_associations(gene_symbol)
         except Exception as e:
-            logging.warning(f"Could not get gene info for {gene_symbol}: {e}")
+            logger.warning(f"Could not get gene info for {gene_symbol}: {e}")
             gene_info = {
                 "symbol": gene_symbol,
                 "name": "Unknown",
@@ -452,7 +440,7 @@ class Harmonizome(object):
         }
 
     @classmethod
-    def get_gene_with_associations(cls, gene_symbol: str) -> dict:
+    def get_gene_with_associations(cls, gene_symbol: str) -> Dict[str, Any]:
         """Get gene information with associations using the API.
 
         This uses the showAssociations=true parameter to get functional
@@ -471,7 +459,7 @@ class Harmonizome(object):
     @classmethod
     def _get_gene_dataset_annotations_from_api(
         cls, gene_symbol: str, dataset: str
-    ) -> dict:
+    ) -> Optional[Dict[str, Any]]:
         """Get functional annotations for a gene in a specific dataset using API.
 
         Note: This method currently has limited functionality due to API constraints.
@@ -493,22 +481,22 @@ class Harmonizome(object):
 
             # The API doesn't currently provide direct access to gene-gene set associations
             # This would require downloading the gene-attribute matrices
-            logging.debug(
+            logger.debug(
                 f"API access to functional associations for {gene_symbol} in {dataset} is not available"
             )
 
             return None
 
         except Exception as e:
-            logging.debug(
+            logger.debug(
                 f"Error processing dataset '{dataset}' for gene '{gene_symbol}': {e}"
             )
             return None
 
     @classmethod
     def download_gene_functional_annotations(
-        cls, gene_symbol: str, datasets: list = None
-    ) -> dict:
+        cls, gene_symbol: str, datasets: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
         """Download and get all functional annotations for a gene across specified datasets.
 
         This method downloads the necessary data files and extracts associations
@@ -534,7 +522,7 @@ class Harmonizome(object):
                 if dataset_annotations:
                     results[dataset] = dataset_annotations
             except Exception as e:
-                logging.debug(
+                logger.debug(
                     f"Error processing dataset '{dataset}' for gene '{gene_symbol}': {e}"
                 )
                 continue
@@ -544,7 +532,7 @@ class Harmonizome(object):
     @classmethod
     def _get_gene_dataset_annotations_from_files(
         cls, gene_symbol: str, dataset: str
-    ) -> dict:
+    ) -> Optional[Dict[str, Any]]:
         """Get functional annotations for a gene in a specific dataset using downloaded files.
 
         Args:
@@ -575,7 +563,7 @@ class Harmonizome(object):
                     attribute_list_file = filename
 
             if not gene_matrix_file:
-                logging.debug(
+                logger.debug(
                     f"Could not download gene-attribute matrix for dataset '{dataset}'"
                 )
                 return None
@@ -604,7 +592,7 @@ class Harmonizome(object):
                     continue
 
             if not gene_found:
-                logging.debug(f"Gene '{gene_symbol}' not found in dataset '{dataset}'")
+                logger.debug(f"Gene '{gene_symbol}' not found in dataset '{dataset}'")
                 return None
 
             # Read attribute list if available
@@ -630,7 +618,7 @@ class Harmonizome(object):
                                 # Fallback to plain text
                                 attribute_names[str(row.iloc[0])] = str(row.iloc[1])
                 except Exception as e:
-                    logging.debug(
+                    logger.debug(
                         f"Could not read attribute list for dataset '{dataset}': {e}"
                     )
 
@@ -675,15 +663,15 @@ class Harmonizome(object):
             }
 
         except Exception as e:
-            logging.debug(
+            logger.debug(
                 f"Error processing dataset '{dataset}' for gene '{gene_symbol}': {e}"
             )
             return None
 
     @classmethod
     def _extract_gene_set_associations(
-        cls, gene_set_detail: dict, gene_symbol: str
-    ) -> list:
+        cls, gene_set_detail: Dict[str, Any], gene_symbol: str
+    ) -> List[Dict[str, Any]]:
         """Extract associations from gene set details.
 
         Args:
@@ -728,7 +716,7 @@ class Harmonizome(object):
                             break
 
                 except Exception as e:
-                    logging.debug(
+                    logger.debug(
                         f"Error getting attribute details for {attr_name}: {e}"
                     )
                     continue
@@ -736,7 +724,9 @@ class Harmonizome(object):
         return associations
 
     @classmethod
-    def _extract_association_score(cls, gene_assoc: dict, attr_detail: dict) -> float:
+    def _extract_association_score(
+        cls, gene_assoc: Dict[str, Any], attr_detail: Dict[str, Any]
+    ) -> Optional[float]:
         """Extract the association score from gene-attribute association.
 
         Args:
@@ -777,8 +767,11 @@ class Harmonizome(object):
 
     @classmethod
     def get_gene_associations_summary(
-        cls, gene_symbol: str, datasets: list = None, use_download: bool = False
-    ) -> dict:
+        cls,
+        gene_symbol: str,
+        datasets: Optional[List[str]] = None,
+        use_download: bool = False,
+    ) -> Dict[str, Any]:
         """Get a summary of all functional associations for a gene.
 
         Args:
@@ -812,8 +805,11 @@ class Harmonizome(object):
 
     @classmethod
     def get_gene_functional_associations_formatted(
-        cls, gene_symbol: str, datasets: list = None, use_download: bool = False
-    ) -> dict:
+        cls,
+        gene_symbol: str,
+        datasets: Optional[List[str]] = None,
+        use_download: bool = False,
+    ) -> Dict[str, Any]:
         """Get functional associations for a gene in Harmonizome web interface format.
 
         This method returns data structured exactly like the Harmonizome web interface,
@@ -833,7 +829,7 @@ class Harmonizome(object):
         try:
             gene_info = cls.get("gene", gene_symbol)
         except Exception as e:
-            logging.warning(f"Could not get gene info for {gene_symbol}: {e}")
+            logger.warning(f"Could not get gene info for {gene_symbol}: {e}")
             gene_info = {
                 "symbol": gene_symbol,
                 "name": "Unknown",
@@ -906,7 +902,9 @@ def _get_next(response: Dict[str, Any]) -> Optional[int]:
 
 
 # This function was adopted from here: http://stackoverflow.com/a/15353312.
-def _download_and_decompress_file(response: BinaryIO, filename: str) -> None:
+def _download_and_decompress_file(
+    response: BinaryIO, filename: Union[Path, str]
+) -> None:
     """Downloads and decompresses a single file from a response object."""
     compressed_file = BytesIO(response.read())
     decompressed_file = gzip.GzipFile(fileobj=compressed_file)
@@ -919,13 +917,14 @@ def _getfshape(
     fn: str,
     row_sep: str = "\n",
     col_sep: str = "\t",
-    open_args: Dict[str, Any] = {},
+    open_args: Optional[Dict[str, Any]] = None,
 ) -> Tuple[int, int]:
     """Fast and efficient way of finding row/col height of file"""
-    with open(fn, "r", newline=row_sep, **open_args) as f:
+    open_kwargs = {} if open_args is None else dict(open_args)
+    with open(fn, "r", newline=row_sep, **open_kwargs) as f:
         col_size = f.readline().count(col_sep) + 1
         row_size = sum(1 for line in f) + 1
-        return (row_size, col_size)
+        return row_size, col_size
 
 
 def _parse(
@@ -939,7 +938,7 @@ def _parse(
     data_dtype: Any = None,
     col_sep: str = "\t",
     row_sep: str = "\n",
-    open_args: Dict[str, Any] = {},
+    open_args: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Any, Any, Any, Any, Any]:
     """
     Smart(er) parser for processing matrix formats. Evaluate size and construct
@@ -960,7 +959,7 @@ def _parse(
     if data_fmt is None:
         data_fmt = np.ndarray
     if index_dtype is None:
-        index_dtype = np.object
+        index_dtype = object
     if data_dtype is None:
         data_dtype = np.float64
 
@@ -975,7 +974,9 @@ def _parse(
     index = index_fmt((rows - column_size, index_size), dtype=index_dtype)
     data = data_fmt((rows - column_size, cols - index_size), dtype=data_dtype)
 
-    with open(fn, "r", newline=row_sep, **open_args) as fh:
+    open_kwargs = {} if open_args is None else dict(open_args)
+
+    with open(fn, "r", newline=row_sep, **open_kwargs) as fh:
         header = np.array([next(fh).strip().split(col_sep) for _ in range(column_size)])
 
         column_names = header[:column_size, index_size - 1]
@@ -997,7 +998,7 @@ def _parse_df(
     default_fill_value: Any = None,
     column_apply: Any = None,
     index_apply: Any = None,
-    df_args: Dict[str, Any] = {},
+    df_args: Optional[Dict[str, Any]] = None,
     **kwargs: Any,
 ) -> pd.DataFrame:
     import numpy as np
@@ -1005,7 +1006,7 @@ def _parse_df(
     from scipy.sparse import lil_matrix
 
     data_fmt = lil_matrix if sparse else np.ndarray
-    df_type = pd.SparseDataFrame if sparse else pd.DataFrame
+    dataframe_kwargs = {} if df_args is None else dict(df_args)
     (
         column_names,
         columns,
@@ -1022,19 +1023,32 @@ def _parse_df(
     if index_apply is not None:
         index_names, index = index_apply(index_names, index)
 
-    return df_type(
-        data=data.tocsr() if sparse else data,
-        index=pd.Index(
-            data=index,
-            name=str(index_names),
-            dtype=np.object,
-        ),
-        columns=pd.Index(
-            data=columns,
-            name=str(column_names),
-            dtype=np.object,
-        ),
-        **df_args,
+    index_values = pd.Index(data=index, name=str(index_names), dtype=object)
+    column_values = pd.Index(data=columns, name=str(column_names), dtype=object)
+
+    if sparse:
+        fill_value = dataframe_kwargs.pop("default_fill_value", default_fill_value)
+        dataframe = pd.DataFrame.sparse.from_spmatrix(
+            data.tocsr(),
+            index=index_values,
+            columns=column_values,
+        )
+        if fill_value is not None:
+            sparse_dtype = pd.SparseDtype(data.dtype, fill_value=fill_value)
+            for column_name in dataframe.columns:
+                dataframe[column_name] = dataframe[column_name].astype(sparse_dtype)
+        if dataframe_kwargs:
+            raise TypeError(
+                "Unexpected DataFrame arguments for sparse parsing: "
+                f"{sorted(dataframe_kwargs.keys())}"
+            )
+        return dataframe
+
+    return pd.DataFrame(
+        data=data,
+        index=index_values,
+        columns=column_values,
+        **dataframe_kwargs,
     )
 
 
