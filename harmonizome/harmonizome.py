@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import ssl
+from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 # Support for both Python2.X and 3.X.
 # -----------------------------------------------------------------------------
@@ -28,6 +29,8 @@ except NameError:
 import pandas as pd
 
 from .utils import cache_to_file
+
+logger = logging.getLogger(__name__)
 
 # Enumerables and constants
 # -----------------------------------------------------------------------------
@@ -55,7 +58,7 @@ class Entity(Enum):
     RESOURCE = "resource"
 
 
-def json_from_url(url):
+def json_from_url(url: str) -> Dict[str, Any]:
     """Returns API response after decoding and loading JSON.
 
     Note: Uses unverified SSL context due to certificate verification issues
@@ -75,16 +78,16 @@ def json_from_url(url):
         try:
             decoded_data = data.decode("utf-8")
         except UnicodeDecodeError:
-            logging.warning(f"UTF-8 decode failed for {url}, trying latin-1")
+            logger.warning(f"UTF-8 decode failed for {url}, trying latin-1")
             decoded_data = data.decode("latin-1")
 
         return json.loads(decoded_data)
     except Exception as e:
-        logging.error(f"Failed to fetch data from {url}: {e}")
+        logger.error(f"Failed to fetch data from {url}: {e}")
         raise
 
 
-def download_from_url(url):
+def download_from_url(url: str) -> BinaryIO:
     """Downloads a file from URL with SSL workaround.
 
     Note: Uses unverified SSL context due to certificate verification issues
@@ -98,7 +101,7 @@ def download_from_url(url):
         response = urlopen(url, context=context)
         return response
     except Exception as e:
-        logging.error(f"Failed to download from {url}: {e}")
+        logger.error(f"Failed to download from {url}: {e}")
         raise
 
 
@@ -110,13 +113,13 @@ DOWNLOAD_URL = "https://maayanlab.cloud/static/hdfs/harmonizome/data"
 # This config objects pulls the names of the datasets, their directories, and
 # the possible downloads from the API. This allows us to add new datasets and
 # downloads without breaking this file.
-def _load_config():
+def _load_config() -> Dict[str, Any]:
     """Load configuration from API with SSL fallback."""
     try:
         config = json_from_url(API_URL + "/dark/script_config")
         return config
     except Exception as e:
-        logging.error(f"Failed to load configuration from API: {e}")
+        logger.error(f"Failed to load configuration from API: {e}")
         # Return minimal config to prevent import errors
         return {
             "downloads": [
@@ -138,12 +141,12 @@ DATASET_TO_PATH = config.get("datasets", {})
 
 
 class GeneData:
-    def __init__(self, gene_info: dict):
+    def __init__(self, gene_info: Dict[str, Any]) -> None:
         self.gene_info = gene_info
         self.associations = gene_info.get("associations", [])
 
     @staticmethod
-    def _parse_gene_set(assoc: dict):
+    def _parse_gene_set(assoc: Dict[str, Any]) -> Tuple[str, str]:
         """Extract gene-set and dataset names from either API payload shape."""
         gene_set = assoc.get("geneSet", {})
         gene_set_full_name = gene_set.get("name", "")
@@ -158,7 +161,7 @@ class GeneData:
         return gene_set_name, dataset_name or parsed_dataset_name
 
     @staticmethod
-    def _association_to_row(assoc: dict) -> dict:
+    def _association_to_row(assoc: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize one API association into a tabular row."""
         gene_set_name, dataset_name = GeneData._parse_gene_set(assoc)
 
@@ -169,7 +172,7 @@ class GeneData:
             "standardizedValue": assoc.get("standardizedValue"),
         }
 
-    def get_associations(self, dataset: str = None):
+    def get_associations(self, dataset: Optional[str] = None) -> List[Dict[str, Any]]:
         if dataset is None:
             return self.associations
         return [
@@ -178,7 +181,9 @@ class GeneData:
             if self._parse_gene_set(assoc)[1] == dataset
         ]
 
-    def save(self, path: str, format: str = "json", dataset: str = None):
+    def save(
+        self, path: str, format: str = "json", dataset: Optional[str] = None
+    ) -> None:
         assocs = self.get_associations(dataset)
         rows = [self._association_to_row(assoc) for assoc in assocs]
         if format == "json":
@@ -191,7 +196,7 @@ class GeneData:
         else:
             raise ValueError("format must be 'json' or 'csv'")
 
-    def to_dataframe(self, dataset: str = None):
+    def to_dataframe(self, dataset: str | None = None) -> pd.DataFrame:
         """
         Return associations as a pandas DataFrame, with columns:
         'gene_set', 'dataset', 'thresholdValue', 'standardizedValue'.
@@ -210,7 +215,9 @@ class Harmonizome(object):
     DATASETS = DATASET_TO_PATH.keys()
 
     @staticmethod
-    def _build_association_group(associations: list, association_type: str) -> dict:
+    def _build_association_group(
+        associations: List[Dict[str, Any]], association_type: str
+    ) -> Dict[str, Any]:
         """Format one directional association group for output."""
         return {
             "type": association_type,
@@ -224,8 +231,8 @@ class Harmonizome(object):
 
     @classmethod
     def _format_functional_associations_from_grouped_data(
-        cls, grouped_data: dict
-    ) -> dict:
+        cls, grouped_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """Convert grouped dataset associations into the public response format."""
         functional_associations = []
         total_associations = 0
@@ -854,7 +861,7 @@ class Harmonizome(object):
         }
 
     @classmethod
-    def get_gene_data(cls, gene_symbol: str, use_cache: bool = False):
+    def get_gene_data(cls, gene_symbol: str, use_cache: bool = False) -> GeneData:
         if use_cache:
             return GeneData(cls._get_gene_with_associations_cached(gene_symbol))
         else:
@@ -862,7 +869,9 @@ class Harmonizome(object):
 
     @staticmethod
     @cache_to_file
-    def _get_gene_with_associations_cached(gene_symbol: str):
+    def _get_gene_with_associations_cached(
+        gene_symbol: str,
+    ) -> Dict[str, Any]:
         return Harmonizome.get_gene_with_associations(gene_symbol)
 
 
@@ -870,26 +879,26 @@ class Harmonizome(object):
 # -------------------------------------------------------------------------
 
 
-def _get_with_cursor(entity, start_at):
+def _get_with_cursor(entity: str, start_at: int) -> Dict[str, Any]:
     """Returns a list of entities based on cursor position."""
     url = "%s/%s/%s?cursor=%s" % (API_URL, VERSION, entity, str(start_at))
     result = json_from_url(url)
     return result
 
 
-def _get_by_name(entity, name):
+def _get_by_name(entity: str, name: str) -> Dict[str, Any]:
     """Returns a single entity based on name."""
     url = "%s/%s/%s/%s" % (API_URL, VERSION, entity, name)
     return json_from_url(url)
 
 
-def _get_entity(response):
+def _get_entity(response: Dict[str, Any]) -> str:
     """Returns the entity from an API response."""
     path = response["next"].split("?")[0]
     return path.split("/")[3]
 
 
-def _get_next(response):
+def _get_next(response: Dict[str, Any]) -> Optional[int]:
     """Returns the next property from an API response."""
     if response["next"]:
         return int(response["next"].split("=")[1])
@@ -897,7 +906,7 @@ def _get_next(response):
 
 
 # This function was adopted from here: http://stackoverflow.com/a/15353312.
-def _download_and_decompress_file(response, filename):
+def _download_and_decompress_file(response: BinaryIO, filename: str) -> None:
     """Downloads and decompresses a single file from a response object."""
     compressed_file = BytesIO(response.read())
     decompressed_file = gzip.GzipFile(fileobj=compressed_file)
@@ -906,7 +915,12 @@ def _download_and_decompress_file(response, filename):
         outfile.write(decompressed_file.read())
 
 
-def _getfshape(fn, row_sep="\n", col_sep="\t", open_args={}):
+def _getfshape(
+    fn: str,
+    row_sep: str = "\n",
+    col_sep: str = "\t",
+    open_args: Dict[str, Any] = {},
+) -> Tuple[int, int]:
     """Fast and efficient way of finding row/col height of file"""
     with open(fn, "r", newline=row_sep, **open_args) as f:
         col_size = f.readline().count(col_sep) + 1
@@ -915,18 +929,18 @@ def _getfshape(fn, row_sep="\n", col_sep="\t", open_args={}):
 
 
 def _parse(
-    fn,
-    column_size=3,
-    index_size=3,
-    shape=None,
-    index_fmt=None,
-    data_fmt=None,
-    index_dtype=None,
-    data_dtype=None,
-    col_sep="\t",
-    row_sep="\n",
-    open_args={},
-):
+    fn: str,
+    column_size: int = 3,
+    index_size: int = 3,
+    shape: Optional[Tuple[int, int]] = None,
+    index_fmt: Any = None,
+    data_fmt: Any = None,
+    index_dtype: Any = None,
+    data_dtype: Any = None,
+    col_sep: str = "\t",
+    row_sep: str = "\n",
+    open_args: Dict[str, Any] = {},
+) -> Tuple[Any, Any, Any, Any, Any]:
     """
     Smart(er) parser for processing matrix formats. Evaluate size and construct
      ndframes with the right size before parsing, this allows for more efficient
@@ -974,18 +988,18 @@ def _parse(
             index[ind, :] = lh[:index_size]
             data[ind, :] = lh[index_size:]
 
-        return (column_names, columns, index_names, index, data)
+        return column_names, columns, index_names, index, data
 
 
 def _parse_df(
-    fn,
-    sparse=False,
-    default_fill_value=None,
-    column_apply=None,
-    index_apply=None,
-    df_args={},
-    **kwargs,
-):
+    fn: str,
+    sparse: bool = False,
+    default_fill_value: Any = None,
+    column_apply: Any = None,
+    index_apply: Any = None,
+    df_args: Dict[str, Any] = {},
+    **kwargs: Any,
+) -> pd.DataFrame:
     import numpy as np
     import pandas as pd
     from scipy.sparse import lil_matrix
@@ -1024,7 +1038,7 @@ def _parse_df(
     )
 
 
-def _df_column_uniquify(df):
+def _df_column_uniquify(df: pd.DataFrame) -> pd.DataFrame:
     df_columns = df.columns
     new_columns = []
     for item in df_columns:
@@ -1038,14 +1052,14 @@ def _df_column_uniquify(df):
     return df
 
 
-def _json_ind_no_slash(ind_names, ind):
+def _json_ind_no_slash(ind_names: Any, ind: Any) -> Tuple[str, List[str]]:
     return (
         json.dumps([ind_name.replace("/", "|") for ind_name in ind_names]),
         [json.dumps([ii.replace("/", "|") for ii in i]) for i in ind],
     )
 
 
-def _read_as_dataframe(fn):
+def _read_as_dataframe(fn: str) -> pd.DataFrame:
     """Standard loading of dataframe"""
     if fn.endswith("gene_attribute_matrix.txt"):
         return _df_column_uniquify(
@@ -1067,7 +1081,9 @@ def _read_as_dataframe(fn):
         raise Exception("Unable to parse this file into a dataframe.")
 
 
-def _read_as_sparse_dataframe(fn, blocksize=10e6, fill_value=0):
+def _read_as_sparse_dataframe(
+    fn: str, blocksize: float = 10e6, fill_value: int = 0
+) -> pd.DataFrame:
     """Efficient loading sparse dataframe"""
     if fn.endswith("gene_attribute_matrix.txt"):
         return _df_column_uniquify(
