@@ -2,6 +2,7 @@
 
 import os
 import shutil
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -46,10 +47,12 @@ class TestHarmonizome:
         assert result == mock_response
         mock_json.assert_called_once()
 
-    @patch("harmonizome.harmonizome.input_shim")
+    @patch("builtins.input")
     def test_download_one_dataset(self, mock_input):
         mock_input.return_value = "y"
         test_dir = "ENCODE"
+        mock_response = MagicMock()
+        mock_response.code = 200
         try:
             with patch.object(
                 Harmonizome, "DATASETS", new={"ENCODE": "encode/path"}
@@ -58,12 +61,15 @@ class TestHarmonizome:
             ), patch(
                 "harmonizome.harmonizome.DOWNLOADS", ["gene_attribute_matrix.txt.gz"]
             ), patch(
-                "harmonizome.harmonizome.os.path.exists", return_value=True
+                "harmonizome.harmonizome.Path.mkdir"
             ), patch(
-                "harmonizome.harmonizome.os.mkdir"
-            ) as mock_mkdir:
+                "pathlib.Path.is_file", return_value=True
+            ), patch(
+                "harmonizome.harmonizome.download_from_url", return_value=mock_response
+            ):
                 filenames = list(Harmonizome.download(["ENCODE"]))
                 assert isinstance(filenames, list)
+                assert filenames == [str(Path(test_dir) / "gene_attribute_matrix.txt")]
         finally:
             # Clean up the ENCODE directory if it was created
             if os.path.exists(test_dir):
