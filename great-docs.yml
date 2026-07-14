@@ -108,7 +108,7 @@ dark_mode_toggle: false
 # ------------
 # Announce a new version of the package
 announcement:
-  content: "Version 1.0 is now on PyPI!"
+  content: "Version 1.0.1 is now on PyPI!"
   style: sky
   url: https://pypi.org/project/harmonizome/
   target: _blank

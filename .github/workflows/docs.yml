@@ -5,6 +5,7 @@ on:
     branches:
       - main
   pull_request:
+  workflow_dispatch:
 
 jobs:
   build-docs:
@@ -107,4 +108,15 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           env: ${{ env.RELEASE_NAME }}
           ref: ${{ github.head_ref }}
+          logs: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Finish Github Deployment
+        uses: bobheadxi/deployments@v1
+        if: ${{ always() && !github.event.pull_request.head.repo.fork }}
+        with:
+          step: finish
+          token: ${{ secrets.GITHUB_TOKEN }}
+          status: ${{ job.status }}
+          env: ${{ steps.deployment.outputs.env }}
+          deployment_id: ${{ steps.deployment.outputs.deployment_id }}
           logs: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"

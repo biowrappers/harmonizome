@@ -1,4 +1,4 @@
-"""Class for reading, parsing, and downloading data from the Harmonizome API."""
+"""Wrapper helpers for reading, parsing, and downloading Ma'ayan Lab Harmonizome data."""
 
 import gzip
 import json
@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Optional, Union
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote_plus
+from urllib.parse import urlparse
 from urllib.request import urlopen
 
 import numpy as np
@@ -472,7 +473,8 @@ class Harmonizome:
         sparse: bool = False,
         **kwargs: Any,
     ) -> Iterator[pd.DataFrame]:
-        for file in cls.download(datasets, what):
+        download_iterator = cls.download(datasets, what)
+        for file in download_iterator:
             if sparse:
                 yield _read_as_sparse_dataframe(file, **kwargs)
             else:
@@ -821,8 +823,10 @@ def _get_by_name(entity: str, name: str) -> dict[str, Any]:
 
 def _get_entity(response: dict[str, Any]) -> str:
     """Returns the entity from an API response."""
-    path = response["next"].split("?")[0]
-    return path.split("/")[3]
+    path_parts = [
+        part for part in urlparse(response["next"]).path.split("/") if part
+    ]
+    return path_parts[-1]
 
 
 def _get_next(response: dict[str, Any]) -> Optional[int]:

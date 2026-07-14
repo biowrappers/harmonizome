@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Command-line interface for the Harmonizome package."""
+"""Command-line interface for the Ma'ayan Lab Harmonizome wrapper package."""
 
 import json
 import logging

@@ -47,8 +47,8 @@ dev = [
 [project.urls]
 Homepage = "https://maayanlab.cloud/Harmonizome/"
 Documentation = "https://maayanlab.cloud/Harmonizome/"
-Repository = "https://github.com/sdhutchins/harmonizome"
-"Bug Tracker" = "https://github.com/sdhutchins/harmonizome/issues"
+Repository = "https://github.com/biowrappers/harmonizome"
+"Bug Tracker" = "https://github.com/biowrappers/harmonizome/issues"
 
 [tool.setuptools.packages.find]
 include = ["harmonizome*"]

@@ -1,4 +1,4 @@
-"""Harmonizome Python Client - A resource for exploring gene sets and their attributes."""
+"""Python wrapper for the Ma'ayan Lab Harmonizome API and dataset downloads."""
 
 from .harmonizome import VERSION, Entity, Harmonizome
 
