@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "harmonizome"
 version = "1.0.1"
-description = "Python client for the Harmonizome API - a resource for exploring gene sets and their attributes"
+description = "Python wrapper for the Ma'ayan Lab Harmonizome API and dataset downloads"
 readme = "README.md"
 license = "MIT"
 authors = [
@@ -14,7 +14,7 @@ authors = [
 maintainers = [
     {name = "Shaurita D. Hutchins", email = "shaurita.d.hutchins@gmail.com"}
 ]
-keywords = ["bioinformatics", "genomics", "gene-sets", "harmonizome", "api-client"]
+keywords = ["bioinformatics", "genomics", "gene-sets", "harmonizome", "api-wrapper", "maayan-lab"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
